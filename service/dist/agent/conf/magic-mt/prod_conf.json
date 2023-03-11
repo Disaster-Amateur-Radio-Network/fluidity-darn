@@ -1,0 +1,28 @@
+{
+    "targets": [{ "location": "https://f-y.io:443/FIFO", "key": "9a2740fc1e442f61340b4dbb2323b361" }],
+    "site": "Magic Mt",
+    "logLevel": "info",
+    "collectors": [
+        {
+            "description": "Agent Report",
+            "plugin": "vRep",
+            "pollIntervalSec": 3600
+        },
+        {
+            "description": "SRS",
+            "plugin": "srsSerial",
+            "path": "COM4",
+            "baudRate": 9600,
+            "keepRaw": true,
+            "extendedOptions": {
+                "portmap": [
+                    "440",
+                    "PV Switch",
+                    "Saddle Pk",
+                    "Hauser Pk",
+                    "2M Remote"
+                ]
+            }
+        }
+    ]
+}
