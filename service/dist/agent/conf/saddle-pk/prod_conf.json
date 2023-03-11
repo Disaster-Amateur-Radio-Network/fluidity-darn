@@ -1,0 +1,31 @@
+{
+    "targets": [{ "location": "https://f-y.io:443/FIFO", "key": "9a2740fc1e442f61340b4dbb2323b361" }],
+    "site": "Saddle Pk",
+    "logLevel": "info",
+    "collectors": [
+        {
+            "description": "Agent Report",
+            "plugin": "vRep",
+            "pollIntervalSec": 3600
+        },
+        {
+            "description": "SRS",
+            "plugin": "srsSerial",
+            "path": "COM5",
+            "baudRate": 9600,
+            "keepRaw": true,
+            "extendedOptions": {
+                "portmap": [
+                    "440",
+                    "Verdugo Pk",
+                    "Cougar Pk",
+                    "Magic Mt",
+                    "Mt San Miguel",
+                    "1.2 GHz Rpt",
+                    "220",
+                    "AllStar"
+                ]
+            }
+        }
+    ]
+}
