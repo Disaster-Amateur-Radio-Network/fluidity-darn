@@ -1,5 +1,5 @@
 {
-    "org": "DARN.org",
+    "org": "DARN",
     "httpCacheTTLSeconds": 600,
     "logLevel": "info",
     "logFormat": "JSON",
