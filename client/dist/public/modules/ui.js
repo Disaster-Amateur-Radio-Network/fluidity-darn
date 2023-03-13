@@ -70,14 +70,14 @@ class FilterManager {
         const applySingle = (fpElem) => {
             if (visibileGlobal.size) {
                 if (visibileGlobal.has(parseInt(fpElem.id.substring(7)))) {
-                    fpElem.classList.remove('hidden');
+                    fpElem.classList.remove('display-none');
                 }
                 else {
-                    fpElem.classList.add('hidden');
+                    fpElem.classList.add('display-none');
                 }
             }
             else {
-                fpElem.classList.remove('hidden');
+                fpElem.classList.remove('display-none');
             }
         };
         if (target instanceof HTMLDivElement) {
@@ -104,7 +104,7 @@ class FilterManager {
         else {
             setTimeout(() => {
                 loaderElem === null || loaderElem === void 0 ? void 0 : loaderElem.classList.remove('loader');
-            }, 700);
+            }, 800);
         }
     }
     clickHandler(e) {
@@ -120,11 +120,11 @@ class FilterManager {
         if (e.target instanceof Element) {
             if (e.target.classList.contains('filter-link')) {
                 if ((_a = e.target.previousElementSibling) === null || _a === void 0 ? void 0 : _a.classList.contains('clear-link')) {
-                    e.target.previousElementSibling.classList.remove('hidden');
+                    e.target.previousElementSibling.classList.remove('display-none');
                 }
             }
             if (e.target.classList.contains('clear-link')) {
-                e.target.classList.add('hidden');
+                e.target.classList.add('display-none');
             }
             if (e.target.classList.contains('collector-filter-link')) {
                 const collector = extractUnique('COLLECTOR', e.target.id);
@@ -177,7 +177,7 @@ class FilterManager {
         const xIcon = document.createElement('i');
         const a = document.createElement('a');
         const typeIcon = document.createElement('i');
-        xIcon.classList.add('fa-solid', 'fa-circle-xmark', `${type.toLocaleLowerCase()}-clear-filter-link`, 'clear-link', 'hidden');
+        xIcon.classList.add('fa-solid', 'fa-circle-xmark', `${type.toLocaleLowerCase()}-clear-filter-link`, 'clear-link', 'display-none');
         a.href = '#0';
         a.classList.add(`${type.toLocaleLowerCase()}-filter-link`, 'filter-link');
         typeIcon.classList.add('fa-solid');
@@ -196,6 +196,7 @@ class FilterManager {
         li.appendChild(xIcon);
         li.appendChild(a);
         li.appendChild(typeIcon);
+        li.classList.add('fade-in');
         ul === null || ul === void 0 ? void 0 : ul.appendChild(li);
     }
     renderFilterLinks(fp) {
@@ -219,22 +220,25 @@ export class FluidityUI {
         const dataElem = document.getElementById('cell-data');
         if (dataElem) {
             dataElem.addEventListener('mousewheel', this.scrollHandler.bind(this), { passive: true });
-            dataElem.addEventListener('touchstart', this.scrollHandler.bind(this), { passive: true });
+            dataElem.addEventListener('touchstart', this.scrollHandler.bind(this));
+            dataElem.addEventListener('touchmove', this.scrollHandler.bind(this));
+            dataElem.addEventListener('touchend', this.scrollHandler.bind(this));
         }
+    }
+    autoScroll() {
+        var _a;
+        (_a = document.getElementById('end-data')) === null || _a === void 0 ? void 0 : _a.scrollIntoView({ behavior: 'smooth', block: 'end', inline: 'start' });
     }
     scrollHandler() {
         this.activeScrolling = true;
         clearTimeout(this.scrollStateTimer);
         this.scrollStateTimer = setTimeout(() => {
             this.activeScrolling = false;
-        }, 100);
+        }, 10000);
     }
     autoScrollRequest() {
         if (!this.activeScrolling) {
-            setTimeout(() => {
-                var _a;
-                (_a = document.getElementById('end-data')) === null || _a === void 0 ? void 0 : _a.scrollIntoView({ behavior: 'smooth' });
-            }, 500);
+            this.autoScroll();
         }
     }
     renderFormattedData(fArr) {
@@ -335,6 +339,9 @@ export class FluidityUI {
                         history.removeChild(history.firstChild);
                     }
                     history.appendChild(this.packetRender(fp));
+                    if (history.lastChild instanceof HTMLElement) {
+                        history.lastChild.classList.add('fade-in');
+                    }
                 }
                 else if (pos === 'current') {
                     if (history.childElementCount > 0) {
@@ -348,6 +355,9 @@ export class FluidityUI {
                         }
                     }
                     current.appendChild(this.packetRender(fp));
+                    if (current.lastChild instanceof HTMLElement) {
+                        current.lastChild.classList.add('fade-in');
+                    }
                 }
                 this.autoScrollRequest();
             });
