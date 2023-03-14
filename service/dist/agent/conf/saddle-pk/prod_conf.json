@@ -9,6 +9,12 @@
             "pollIntervalSec": 3600
         },
         {
+            "description": "Net Watcher",
+            "plugin": "hamLive",
+            "url": "https://www.ham.live/api/data/livenets",
+            "pollIntervalSec": 60
+        },
+        {
             "description": "SRS",
             "plugin": "srsSerial",
             "path": "COM5",
