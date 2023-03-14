@@ -1,0 +1,7 @@
+{
+    "org": "DARN",
+    "httpCacheTTLSeconds": 600,
+    "logLevel": "info",
+    "logFormat": "JSON",
+    "permittedKeys": ["changeMe", "or set by env var"]
+}
