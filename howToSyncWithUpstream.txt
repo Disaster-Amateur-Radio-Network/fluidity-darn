@@ -1,0 +1,4 @@
+git fetch upstream
+git merge upstream/main
+git status
+git push
