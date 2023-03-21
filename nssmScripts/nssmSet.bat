@@ -1,4 +1,5 @@
 SET NSSMDIR=C:\Users\admin\nssm-2.24\win64
+SET "CURDIR=%cd%"
 cd %NSSMDIR%
 
 nssm set FluidityAgentService Application C:\Users\admin\fluidity-darn\agent.bat
@@ -30,3 +31,5 @@ nssm set FluidityAgentService AppRotateFiles 1
 nssm set FluidityAgentService AppRotateOnline 0
 nssm set FluidityAgentService AppRotateSeconds 86400
 nssm set FluidityAgentService AppRotateBytes 1048576
+
+cd %CURDIR%
