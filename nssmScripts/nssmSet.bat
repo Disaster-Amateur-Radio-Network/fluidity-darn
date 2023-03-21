@@ -1,7 +1,5 @@
-md C:\Users\admin\fluidity-logs
-
-cd C:\Users\admin\nssm-2.24\win64
-nssm install FluidityAgentService
+SET NSSMDIR=C:\Users\admin\nssm-2.24\win64
+cd %NSSMDIR%
 
 nssm set FluidityAgentService Application C:\Users\admin\fluidity-darn\agent.bat
 nssm set FluidityAgentService AppDirectory C:\Users\admin\fluidity-darn
@@ -20,6 +18,8 @@ nssm set FluidityAgentService AppStopMethodThreads 1500
 nssm set FluidityAgentService AppThrottle 10000
 nssm set FluidityAgentService AppExit Default Restart
 nssm set FluidityAgentService AppRestartDelay 60000
+
+md C:\Users\admin\fluidity-logs
 
 nssm set FluidityAgentService AppStdout C:\Users\admin\fluidity-logs\out.log
 nssm set FluidityAgentService AppStderr C:\Users\admin\fluidity-logs\error.log
