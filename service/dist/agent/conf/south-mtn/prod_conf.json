@@ -1,5 +1,5 @@
 {
-    "targets": [{ "location": "https://f-y.io:443/FIFO", "key": "9a2740fc1e442f61340b4dbb2323b361" }],
+    "targets": [{ "location": "https://f-y.io:443/FIFO", "key": "DO NOT STORE KEY IN GITHUB REPO" }],
     "site": "South Mt",
     "logLevel": "info",
     "collectors": [
