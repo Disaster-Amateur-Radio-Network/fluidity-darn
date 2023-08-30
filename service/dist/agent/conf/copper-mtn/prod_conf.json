@@ -1,0 +1,26 @@
+{
+    "targets": [{ "location": "https://f-y.io:443/FIFO", "key": "“DO NOT STORE KEY IN GITHUB REPO" }],
+    "site": "Copper Mtn",
+    "logLevel": "info",
+    "collectors": [
+        {
+            "description": "Agent Report",
+            "plugin": "vRep",
+            "pollIntervalSec": 3600
+        },
+        {
+            "description": "SRS",
+            "plugin": "srsSerial",
+            "path": "COM4",
+            "baudRate": 9600,
+            "keepRaw": true,
+            "extendedOptions": {
+                "portmap": [
+                    "440",
+                    "Ord Mtn",
+                    "TBD"
+                ]
+            }
+        }
+    ]
+}
