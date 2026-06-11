@@ -1,5 +1,5 @@
 {
-    "targets": [{ "location": "https://f-y.io:443/FIFO", "key": ""DO NOT STORE KEY IN GITHUB REPO" }],
+    "targets": [{ "location": "https://f-y.io:443/FIFO", "key": "DO NOT STORE KEY IN GITHUB REPO" }],
     "site": "Mt Wilson",
     "logLevel": "info",
     "collectors": [
