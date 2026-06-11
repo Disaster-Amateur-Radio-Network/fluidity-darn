@@ -1,6 +1,7 @@
 import { fetchLogger } from '#@shared/modules/logger.js';
 import { confFromFS } from '#@shared/modules/fluidityConfig.js';
-import { SerialPort, ReadlineParser, RegexParser } from 'serialport';
+import { SerialPort, SerialPortMock, ReadlineParser, RegexParser } from 'serialport';
+import { simProfileFromPath, startFeeder } from '#@sims/index.js';
 import {
     FormattedData,
     FluidityPacket,
@@ -13,7 +14,7 @@ import {
     isObject
 } from '#@shared/types.js';
 
-import throttledQueue from 'throttled-queue';
+import { throttledQueue } from 'throttled-queue';
 
 const conf = await confFromFS();
 const log = fetchLogger(conf);
@@ -115,16 +116,13 @@ export abstract class DataCollector implements DataCollectorPlugin {
         const { maxHttpsReqPerCollectorPerSec = 2 } = params;
         log.info(`Agent: maxHttpsReqPerCollectorPerSec: ${maxHttpsReqPerCollectorPerSec}`);
 
-        //This module isn't working too well with es-iterop
-
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        //@ts-ignore
-
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        this.throttle = throttledQueue(maxHttpsReqPerCollectorPerSec, 1000);
+        this.throttle = throttledQueue({ maxPerInterval: maxHttpsReqPerCollectorPerSec, interval: 1000 });
     }
 
     abstract start(): void;
+
+    //release any timers/handles so the process can exit cleanly
+    stop(): void {}
 
     abstract format(data: string, fh: FormatHelper): FormattedData[] | null;
 
@@ -134,13 +132,17 @@ export abstract class DataCollector implements DataCollectorPlugin {
         return new Promise((resolve, reject) => {
             if (method === 'POST') {
                 if (!key) {
-                    reject(`DataCollector: missing API key for ${uo.toString()}`);
+                    reject(new Error(`DataCollector: missing API key for ${uo.toString()}`));
+                    return;
                 }
 
-                if (key && !/^[a-zA-Z0-9]+$/.test(key)) {
+                if (!/^[a-zA-Z0-9]+$/.test(key)) {
                     reject(
-                        `Invalid key format - API keys should be alphanumeric\nConsier using the bin/genApiKey utility`
+                        new Error(
+                            `Invalid key format - API keys should be alphanumeric\nConsider using the bin/genApiKey utility`
+                        )
                     );
+                    return;
                 }
             }
 
@@ -165,33 +167,27 @@ export abstract class DataCollector implements DataCollectorPlugin {
                             log.warn('Server responded with: Unauthorized');
                             log.warn('Agent likely using invalidated api-key');
                         }
-                        if (res.statusCode && res.statusCode / 2 === 100) {
+                        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
                             resolve(data);
                         } else {
                             req.end();
-                            reject(`makeReq() non 200 series response`);
+                            reject(new Error(`makeReq() non 200 series response (${res.statusCode ?? 'none'})`));
                         }
                     });
                     res.on('error', () => {
                         req.end();
-                        reject(`makeReq() request error`);
+                        reject(new Error(`makeReq() request error`));
                     });
                 }
             );
 
             req.on('error', e => {
-                if (isHttpError(e)) {
-                    if (e.code === 'ECONNREFUSED') {
-                        req.end();
-                        reject(`Connection REFUSED connecting to host ${e.address} on port ${e.port}`);
-                    }
-                } else if (isSysError(e)) {
-                    if (e.code === 'ECONNRESET') {
-                        req.end();
-                        reject(`Connection RESET during ${e.syscall}`);
-                    }
+                req.end();
+                if (isHttpError(e) && e.code === 'ECONNREFUSED') {
+                    reject(new Error(`Connection REFUSED connecting to host ${e.address} on port ${e.port}`));
+                } else if (isSysError(e) && e.code === 'ECONNRESET') {
+                    reject(new Error(`Connection RESET during ${e.syscall}`));
                 } else {
-                    req.end();
                     reject(e);
                 }
             });
@@ -208,7 +204,7 @@ export abstract class DataCollector implements DataCollectorPlugin {
         });
     }
 
-    private async post(location: string, data: unknown, key: string): Promise<string> {
+    protected async post(location: string, data: unknown, key: string): Promise<string> {
         return await this.throttle<string>(async () => {
             return await this._reqJSON('POST', new URL(location), data, key);
         });
@@ -218,7 +214,7 @@ export abstract class DataCollector implements DataCollectorPlugin {
         log.debug(`to: ${JSON.stringify(targets)}`);
         log.debug(fPacket);
 
-        for await (const { location, key } of targets) {
+        for (const { location, key } of targets) {
             try {
                 await this.post(location, fPacket, key);
             } catch (err) {
@@ -262,6 +258,7 @@ export interface WebJSONCollectorParams extends PollingCollectorParams {
 
 export abstract class PollingCollector extends DataCollector implements DataCollectorPlugin {
     protected pollIntervalSec: number;
+    protected timer: NodeJS.Timeout | undefined;
 
     constructor({ pollIntervalSec, ...params }: PollingCollectorParams) {
         super(params);
@@ -285,10 +282,14 @@ export abstract class PollingCollector extends DataCollector implements DataColl
         try {
             log.info(`started: ${this.params.plugin} [${this.params.description}]`);
             this.execPerInterval();
-            setTimeout(this.start.bind(this), this.pollIntervalSec * 1000);
+            this.timer = setTimeout(this.start.bind(this), this.pollIntervalSec * 1000);
         } catch (err) {
             log.error(err);
         }
+    }
+
+    override stop(): void {
+        if (this.timer) clearTimeout(this.timer);
     }
 }
 
@@ -322,13 +323,39 @@ export interface SerialCollectorPlugin extends DataCollectorPlugin {
 }
 
 export abstract class SerialCollector extends DataCollector implements SerialCollectorPlugin {
-    protected port: SerialPort;
+    protected port: SerialPort | SerialPortMock;
     protected parser: SerialParser;
 
     abstract fetchParser(): SerialParser;
 
     format(data: string, fh: FormatHelper): FormattedData[] | null {
         return fh.e(data).done;
+    }
+
+    //single seam for port construction: real device, sim:// virtual device, or test override
+    protected openPort(path: string, baudRate: number): SerialPort | SerialPortMock {
+        const onOpenError = (err: Error | null): void => {
+            if (err?.stack) log.error(err.stack);
+        };
+
+        const profile = simProfileFromPath(path);
+
+        if (profile) {
+            SerialPortMock.binding.createPort(path);
+            const port = new SerialPortMock({ path, baudRate }, onOpenError);
+
+            port.on('open', () => {
+                log.info(
+                    `${this.params.plugin} [${this.params.description}]: simulating serial device on ${path} (profile: ${profile.name})`
+                );
+                const feeder = startFeeder(profile, chunk => port.port?.emitData(chunk));
+                port.on('close', () => feeder.stop());
+            });
+
+            return port;
+        }
+
+        return new SerialPort({ path, baudRate }, onOpenError);
     }
 
     constructor({ path, baudRate, ...params }: SerialCollectorParams) {
@@ -341,14 +368,20 @@ export abstract class SerialCollector extends DataCollector implements SerialCol
         if (typeof baudRate !== 'number')
             throw new Error(`expected numeric port speed in config for ${params.plugin}: ${params.description}`);
 
-        this.port = new SerialPort({ path, baudRate }, err => {
-            if (err?.stack) log.error(err.stack);
-        });
+        this.port = this.openPort(path, baudRate);
         this.parser = this.port.pipe(this.fetchParser());
     }
 
     start(): void {
         this.parser.on('data', this.send.bind(this));
         log.info(`started: ${this.params.plugin} [${this.params.description}]`);
+    }
+
+    override stop(): void {
+        if (this.port.isOpen) {
+            this.port.close();
+        } else {
+            this.port.once('open', () => this.port.close());
+        }
     }
 }

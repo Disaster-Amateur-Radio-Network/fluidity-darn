@@ -1,7 +1,8 @@
 import { fetchLogger } from '#@shared/modules/logger.js';
 import { confFromDOM } from '#@shared/modules/fluidityConfig.js';
+import { inBrowser } from '#@shared/modules/utils.js';
 import { isFluidityLink } from '#@shared/types.js';
-const conf = confFromDOM();
+const conf = inBrowser() ? confFromDOM() : undefined;
 const log = fetchLogger(conf);
 class FilterManager {
     constructor(hooks) {
@@ -100,7 +101,7 @@ class FilterManager {
                 resolve();
             }
             catch (err) {
-                reject(err);
+                reject(err instanceof Error ? err : new Error(String(err)));
             }
         });
     }

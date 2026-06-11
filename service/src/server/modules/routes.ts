@@ -1,30 +1,50 @@
-import { Router } from 'express';
-import { GET, POST, SSE } from './controller.js';
-import { apiKeyAuth } from '@vpriem/express-api-key-auth';
-import { confFromFS } from '#@shared/modules/fluidityConfig.js';
-const conf = await confFromFS();
+import { Router, RequestHandler } from 'express';
+import { FluidityController } from './controller.js';
+import { MyConfigData } from '#@shared/modules/fluidityConfig.js';
 
-export const router = Router();
+//minimal X-Api-Key check, replacing @vpriem/express-api-key-auth
+//(its bundled express 4 typings clash with express 5)
+const apiKeyAuth =
+    (keys: string[]): RequestHandler =>
+    (req, res, next) => {
+        const key = req.header('x-api-key');
 
-router.get('/', (req, res) => {
-    res.render('index');
-});
+        if (key && keys.includes(key)) {
+            next();
+            return;
+        }
 
-router.get('/about', (req, res) => {
-    res.render('about');
-});
+        res.status(401).json({ error: 'unauthorized' });
+    };
 
-router.get('/FIFO', GET);
-router.get('/SSE', SSE);
+export const makeRouter = (conf: MyConfigData | undefined, controller: FluidityController): Router => {
+    const router = Router();
 
-const permittedKeys = process.env['PERMITTED_KEY'] ? [process.env['PERMITTED_KEY']] : conf?.permittedKeys;
+    router.get('/', (req, res) => {
+        res.render('index');
+    });
 
-if (!permittedKeys) {
-    throw new Error('server missing PERMITTED_KEY env var or permitted key list in conf');
-}
+    router.get('/about', (req, res) => {
+        res.render('about');
+    });
 
-if (Array.isArray(permittedKeys) && permittedKeys.every(pk => typeof pk === 'string' && /^[a-zA-Z0-9]+$/.test(pk))) {
-    router.post('/FIFO', apiKeyAuth(permittedKeys), POST);
-} else {
-    throw new Error('Invalid permitted key or key list format');
-}
+    router.get('/FIFO', controller.GET);
+    router.get('/SSE', controller.SSE);
+
+    const permittedKeys = process.env['PERMITTED_KEY'] ? [process.env['PERMITTED_KEY']] : conf?.permittedKeys;
+
+    if (!permittedKeys) {
+        throw new Error('server missing PERMITTED_KEY env var or permitted key list in conf');
+    }
+
+    if (
+        Array.isArray(permittedKeys) &&
+        permittedKeys.every(pk => typeof pk === 'string' && /^[a-zA-Z0-9]+$/.test(pk))
+    ) {
+        router.post('/FIFO', apiKeyAuth(permittedKeys), controller.POST);
+    } else {
+        throw new Error('Invalid permitted key or key list format');
+    }
+
+    return router;
+};
