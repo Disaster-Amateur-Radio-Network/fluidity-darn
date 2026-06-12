@@ -1,15 +1,28 @@
 import { fetchLogger } from '#@shared/modules/logger.js';
 import { confFromDOM } from '#@shared/modules/fluidityConfig.js';
 import { inBrowser } from '#@shared/modules/utils.js';
-import { isFluidityLink } from '#@shared/types.js';
+import { isFluidityLink, decodeSuggestStyle } from '#@shared/types.js';
+import { livenessOf } from './pulse.js';
+import { typeIn } from './typewriter.js';
 const conf = inBrowser() ? confFromDOM() : undefined;
 const log = fetchLogger(conf);
+const safeTime = (value, opts) => {
+    const d = new Date(value);
+    if (!Number.isFinite(d.getTime())) {
+        log.warn(`unparseable timestamp in packet: ${JSON.stringify(value)}`);
+        return '--:--';
+    }
+    return opts ? d.toLocaleTimeString([], opts) : d.toLocaleTimeString();
+};
+const PILL_LABEL_MAX = 15;
+const truncatePillLabel = (s) => (s.length > PILL_LABEL_MAX ? `${s.slice(0, PILL_LABEL_MAX)}..` : s);
 class FilterManager {
     constructor(hooks) {
         var _a;
         this.hooks = hooks;
         this.siteIndex = new Map();
         this.collectorIndex = new Map();
+        this.siteLastSeen = new Map();
         this.sitesClicked = new Set();
         this.collectorsClicked = new Set();
         this.filterCount = 0;
@@ -117,106 +130,136 @@ class FilterManager {
         }
     }
     clickHandler(e) {
-        var _a, _b;
+        var _a;
         const extractUnique = (type, id) => {
-            const match = id.match(new RegExp(`(?:filter|clear)-${type.toLocaleLowerCase()}-(.*)`));
+            const match = id.match(new RegExp(`filter-${type.toLowerCase()}-(.*)`));
             if (Array.isArray(match) && match.length) {
                 return match[1];
             }
             return;
         };
-        if (e.target instanceof Element) {
-            if (e.target.classList.contains('filter-link')) {
-                e.preventDefault();
-                if ((_a = e.target.previousElementSibling) === null || _a === void 0 ? void 0 : _a.classList.contains('clear-link')) {
-                    e.target.previousElementSibling.classList.remove('display-none');
-                }
-            }
-            if (e.target.classList.contains('clear-link')) {
-                e.preventDefault();
-                e.target.classList.add('display-none');
-            }
-            if (e.target.classList.contains('collector-filter-link')) {
-                const collector = extractUnique('COLLECTOR', e.target.id);
-                collector && this.collectorsClicked.add(collector);
-            }
-            if (e.target.classList.contains('collector-clear-filter-link')) {
-                const collector = extractUnique('COLLECTOR', e.target.id);
-                collector && this.collectorsClicked.delete(collector);
-            }
-            if (e.target.classList.contains('site-filter-link')) {
-                const site = extractUnique('SITE', e.target.id);
-                site && this.sitesClicked.add(site);
-            }
-            if (e.target.classList.contains('site-clear-filter-link')) {
-                const site = extractUnique('SITE', e.target.id);
-                site && this.sitesClicked.delete(site);
-            }
-            this.filterCount = this.sitesClicked.size + this.collectorsClicked.size;
-            if (e.target.classList.contains('filter-link') || e.target.classList.contains('clear-link')) {
-                this.loader(true);
-                this.applyVisibilityAll()
-                    .then(() => {
-                    this.loader(false);
-                })
-                    .catch(err => {
-                    this.loader(false);
-                    log.error(err);
-                });
-                this.renderFilterStats();
-                (_b = this.hooks) === null || _b === void 0 ? void 0 : _b.onLinkClick();
-            }
+        if (!(e.target instanceof Element))
+            return;
+        const pill = e.target.closest('li.filter-pill');
+        if (!(pill instanceof Element))
+            return;
+        e.preventDefault();
+        const link = pill.querySelector('a.filter-link');
+        if (!(link instanceof Element))
+            return;
+        const isCollector = link.classList.contains('collector-filter-link');
+        const name = extractUnique(isCollector ? 'COLLECTOR' : 'SITE', link.id);
+        if (name === undefined)
+            return;
+        const selections = isCollector ? this.collectorsClicked : this.sitesClicked;
+        const nowSelected = !selections.has(name);
+        nowSelected ? selections.add(name) : selections.delete(name);
+        pill.classList.toggle('filter-selected', nowSelected);
+        link.setAttribute('aria-pressed', String(nowSelected));
+        this.filterCount = this.sitesClicked.size + this.collectorsClicked.size;
+        this.loader(true);
+        this.applyVisibilityAll()
+            .then(() => {
+            this.loader(false);
+        })
+            .catch(err => {
+            this.loader(false);
+            log.error(err);
+        });
+        this.renderFilterStats();
+        (_a = this.hooks) === null || _a === void 0 ? void 0 : _a.onLinkClick();
+    }
+    refreshLiveness(now = Date.now()) {
+        for (const [site, seen] of this.siteLastSeen) {
+            const dot = document.getElementById(`live-site-${site}`);
+            if (!dot)
+                continue;
+            dot.classList.remove('live-dot--fresh', 'live-dot--recent', 'live-dot--stale');
+            dot.classList.add(`live-dot--${livenessOf(seen, now)}`);
         }
+    }
+    indexAdd(index, key, seq) {
+        const seqs = index.get(key);
+        if (seqs) {
+            seqs.add(seq);
+        }
+        else {
+            index.set(key, new Set([seq]));
+        }
+    }
+    indexRemove(index, key, seq) {
+        if (key === undefined)
+            return;
+        const seqs = index.get(key);
+        if (!seqs)
+            return;
+        seqs.delete(seq);
+        if (!seqs.size)
+            index.delete(key);
     }
     index(fp) {
+        var _a;
+        const seenAt = new Date(fp.ts).getTime();
+        if (Number.isFinite(seenAt)) {
+            const prev = (_a = this.siteLastSeen.get(fp.site)) !== null && _a !== void 0 ? _a : 0;
+            if (seenAt > prev)
+                this.siteLastSeen.set(fp.site, seenAt);
+        }
         if (fp.seq) {
-            if (this.siteIndex.has(fp.site)) {
-                const old = this.siteIndex.get(fp.site);
-                if (old) {
-                    this.siteIndex.set(fp.site, old.add(fp.seq));
-                }
-            }
-            else {
-                this.siteIndex.set(fp.site, new Set([fp.seq]));
-            }
-            if (this.collectorIndex.has(fp.plugin)) {
-                const old = this.collectorIndex.get(fp.plugin);
-                if (old) {
-                    this.collectorIndex.set(fp.plugin, old.add(fp.seq));
-                }
-            }
-            else {
-                this.collectorIndex.set(fp.plugin, new Set([fp.seq]));
-            }
+            this.indexAdd(this.siteIndex, fp.site, fp.seq);
+            this.indexAdd(this.collectorIndex, fp.plugin, fp.seq);
         }
     }
+    deindex(site, collector, seq) {
+        if (!Number.isFinite(seq))
+            return;
+        this.indexRemove(this.siteIndex, site, seq);
+        this.indexRemove(this.collectorIndex, collector, seq);
+    }
     renderType(type, fp) {
-        const ul = document.getElementById(`${type.toLocaleLowerCase()}-filter-list`);
+        const unique = type === 'COLLECTOR' ? fp.plugin : fp.site;
+        if (document.getElementById(`filter-${type.toLowerCase()}-${unique}`))
+            return;
+        const ul = document.getElementById(`${type.toLowerCase()}-filter-list`);
         const li = document.createElement('li');
-        const xIcon = document.createElement('i');
         const a = document.createElement('a');
         const typeIcon = document.createElement('i');
-        xIcon.classList.add('fa-solid', 'fa-circle-xmark', `${type.toLocaleLowerCase()}-clear-filter-link`, 'clear-link', 'display-none');
         a.href = '#0';
-        a.classList.add(`${type.toLocaleLowerCase()}-filter-link`, 'filter-link');
+        a.classList.add(`${type.toLowerCase()}-filter-link`, 'filter-link');
+        a.setAttribute('role', 'button');
+        a.setAttribute('aria-pressed', 'false');
         typeIcon.classList.add('fa-solid');
         if (type === 'COLLECTOR') {
-            xIcon.id = `clear-collector-${fp.plugin}`;
-            a.innerText = fp.plugin;
+            a.title = fp.plugin;
+            a.innerText = truncatePillLabel(fp.plugin);
             a.id = `filter-collector-${fp.plugin}`;
             typeIcon.classList.add('fa-circle-nodes');
         }
         else if (type === 'SITE') {
-            xIcon.id = `clear-site-${fp.site}`;
-            a.innerText = fp.site;
+            a.title = fp.site;
+            a.innerText = truncatePillLabel(fp.site);
             a.id = `filter-site-${fp.site}`;
             typeIcon.classList.add('fa-tower-cell');
+            const dot = document.createElement('span');
+            dot.classList.add('live-dot');
+            dot.id = `live-site-${fp.site}`;
+            li.appendChild(dot);
         }
-        li.appendChild(xIcon);
         li.appendChild(a);
         li.appendChild(typeIcon);
-        li.classList.add('fade-in');
+        li.classList.add('filter-pill', 'fade-in');
         ul === null || ul === void 0 ? void 0 : ul.appendChild(li);
+        this.syncPillWidth(ul);
+    }
+    syncPillWidth(ul) {
+        if (!ul)
+            return;
+        let max = 0;
+        ul.querySelectorAll('a.filter-link').forEach(a => {
+            var _a;
+            max = Math.max(max, ((_a = a.textContent) !== null && _a !== void 0 ? _a : '').length);
+        });
+        ul.style.setProperty('--label-ch', `${max}ch`);
     }
     renderFilterLinks(fp) {
         if (!this.collectorIndex.has(fp.plugin)) {
@@ -228,30 +271,45 @@ class FilterManager {
         this.index(fp);
     }
 }
+const TYPE_BYPASS_PER_SEC = 6;
 export class FluidityUI {
     constructor(history) {
-        var _a, _b;
+        var _a, _b, _c, _d, _e;
         this.history = history;
         this.highestScrollPos = 0;
+        this.liveArrivals = [];
+        this.typeFn = typeIn;
+        this.now = () => performance.now();
         this.lastVh = window.innerHeight;
-        this.demarc = (_a = history.at(-1)) === null || _a === void 0 ? void 0 : _a.seq;
+        this.demarc = (_b = (_a = history.at(-1)) === null || _a === void 0 ? void 0 : _a.seq) !== null && _b !== void 0 ? _b : 0;
         this.fm = new FilterManager({
             onLinkClick: this.scrollReset.bind(this)
         });
         this.packetSet('history', history);
-        (_b = document.getElementById('logo-link')) === null || _b === void 0 ? void 0 : _b.addEventListener('click', e => {
+        this.flushFrame();
+        const tick = setInterval(() => this.fm.refreshLiveness(), 15000);
+        (_d = (_c = tick).unref) === null || _d === void 0 ? void 0 : _d.call(_c);
+        (_e = document.getElementById('logo-link')) === null || _e === void 0 ? void 0 : _e.addEventListener('click', e => {
             e.preventDefault();
             this.autoScroll();
         });
+    }
+    refreshLiveness(now) {
+        this.fm.refreshLiveness(now);
+    }
+    flushFrame() {
+        this.autoScrollRequest();
+        this.fm.renderFilterStats();
+        this.fm.refreshLiveness();
     }
     scrollReset() {
         this.highestScrollPos = 0;
         this.autoScroll();
     }
     autoScroll() {
-        var _a;
-        (_a = document
-            .getElementById('end-data')) === null || _a === void 0 ? void 0 : _a.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        const el = document.getElementById('cell-data');
+        if (el)
+            el.scrollTop = el.scrollHeight;
     }
     autoScrollRequest() {
         var _a;
@@ -281,35 +339,41 @@ export class FluidityUI {
     }
     renderFormattedData(fArr) {
         const renderFormattedFrag = document.createDocumentFragment();
+        const styleClasses = (suggestStyle) => {
+            const { color, trim } = decodeSuggestStyle(suggestStyle);
+            return trim ? [`fp-color-${color}`, 'fp-trim'] : [`fp-color-${color}`];
+        };
         const markupStringType = (field, suggestStyle = 0) => {
             const stringFrag = document.createDocumentFragment();
             const span = document.createElement('span');
             span.innerText = field;
-            span.classList.add('fp-line', 'fp-string');
-            if (suggestStyle >= 100) {
-                span.classList.add('fp-trim', `fp-color-${suggestStyle % 10}`);
-            }
-            else {
-                span.classList.add(`fp-color-${suggestStyle}`);
-            }
+            span.classList.add('fp-line', 'fp-string', ...styleClasses(suggestStyle));
             stringFrag.appendChild(span);
             return stringFrag;
         };
         const markupLinkType = (field, suggestStyle = 0) => {
             const linkFrag = document.createDocumentFragment();
+            if (!/^https?:\/\//i.test(field.location)) {
+                const span = document.createElement('span');
+                span.innerText = field.name;
+                span.classList.add('fp-line', 'fp-string', ...styleClasses(suggestStyle));
+                linkFrag.appendChild(span);
+                return linkFrag;
+            }
             const a = document.createElement('a');
             a.href = field.location;
             a.innerText = field.name;
-            a.classList.add('fp-line', 'fp-link', `fp-color-${suggestStyle}`);
+            a.classList.add('fp-line', 'fp-link', ...styleClasses(suggestStyle));
             a.setAttribute('target', '_blank');
+            a.rel = 'noopener noreferrer';
             linkFrag.appendChild(a);
             return linkFrag;
         };
         const markupDateType = (field, suggestStyle = 0) => {
             const dateFrag = document.createDocumentFragment();
             const span = document.createElement('span');
-            span.innerText = new Date(field).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            span.classList.add('fp-line', 'fp-date', `fp-color-${suggestStyle}`);
+            span.innerText = safeTime(field, { hour: '2-digit', minute: '2-digit' });
+            span.classList.add('fp-line', 'fp-date', ...styleClasses(suggestStyle));
             dateFrag.appendChild(span);
             return dateFrag;
         };
@@ -336,19 +400,21 @@ export class FluidityUI {
         const mainFrag = document.createDocumentFragment();
         const div = document.createElement('div');
         div.classList.add('fluidity-packet');
+        div.dataset['site'] = fp.site;
+        div.dataset['collector'] = fp.plugin;
         if (fp.seq) {
             div.id = `fp-seq-${fp.seq}`;
+            div.dataset['seq'] = String(fp.seq);
         }
         this.fm.renderFilterLinks(fp);
         this.fm.filtersClicked() && this.fm.applyVisibility(div);
-        this.fm.renderFilterStats();
         const oBracket = document.createElement('span');
         oBracket.classList.add('bracket-open');
         oBracket.innerText = '[';
         div.appendChild(oBracket);
         const ts = document.createElement('span');
         ts.classList.add('date');
-        ts.innerText = new Date(fp.ts).toLocaleTimeString();
+        ts.innerText = safeTime(fp.ts);
         div.appendChild(ts);
         const cBracket = document.createElement('span');
         cBracket.classList.add('bracket-close');
@@ -374,16 +440,25 @@ export class FluidityUI {
         mainFrag.appendChild(div);
         return mainFrag;
     }
+    evictOldest(container) {
+        const victim = container.firstChild;
+        if (!victim)
+            return;
+        if (victim instanceof HTMLElement) {
+            const { site, collector, seq } = victim.dataset;
+            this.fm.deindex(site, collector, Number(seq));
+        }
+        container.removeChild(victim);
+    }
     packetSet(pos, fpArr) {
-        var _a;
         const history = document.getElementById('history-data');
         const current = document.getElementById('current-data');
-        const maxCount = (_a = conf === null || conf === void 0 ? void 0 : conf.maxClientHistory) !== null && _a !== void 0 ? _a : 4000;
+        const maxCount = Number(conf === null || conf === void 0 ? void 0 : conf.maxClientHistory) || 4000;
         if (history && current) {
             fpArr.forEach(fp => {
                 if (pos === 'history') {
-                    if (history.firstChild && history.childElementCount > maxCount) {
-                        history.removeChild(history.firstChild);
+                    if (history.childElementCount > maxCount) {
+                        this.evictOldest(history);
                     }
                     history.appendChild(this.packetRender(fp));
                     if (history.lastChild instanceof HTMLElement) {
@@ -392,23 +467,37 @@ export class FluidityUI {
                 }
                 else if (pos === 'current') {
                     if (history.childElementCount > 0) {
-                        if (history.firstChild && history.childElementCount + current.childElementCount >= maxCount) {
-                            history.removeChild(history.firstChild);
+                        if (history.childElementCount + current.childElementCount >= maxCount) {
+                            this.evictOldest(history);
                         }
                     }
                     else {
-                        if (current.firstChild && current.childElementCount >= maxCount) {
-                            current.removeChild(current.firstChild);
+                        if (current.childElementCount >= maxCount) {
+                            this.evictOldest(current);
                         }
                     }
                     current.appendChild(this.packetRender(fp));
                     if (current.lastChild instanceof HTMLElement) {
-                        current.lastChild.classList.add('fade-in');
+                        if (!this.floodBypass(this.now())) {
+                            this.typeFn(current.lastChild);
+                        }
                     }
                 }
-                this.autoScrollRequest();
             });
         }
+    }
+    floodBypass(now) {
+        var _a;
+        this.liveArrivals.push(now);
+        const cutoff = now - 1000;
+        while (this.liveArrivals.length && ((_a = this.liveArrivals[0]) !== null && _a !== void 0 ? _a : 0) < cutoff) {
+            this.liveArrivals.shift();
+        }
+        return this.liveArrivals.length > TYPE_BYPASS_PER_SEC;
+    }
+    resync(history) {
+        var _a, _b;
+        this.demarc = (_b = (_a = history.at(-1)) === null || _a === void 0 ? void 0 : _a.seq) !== null && _b !== void 0 ? _b : 0;
     }
     packetAdd(fp) {
         if (typeof this.demarc === 'number' && typeof fp.seq === 'number') {

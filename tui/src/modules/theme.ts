@@ -14,16 +14,20 @@ export interface StyleDef {
 
 const STYLES = [
     { hex: '#ffe5ff', ansi16: 97 }, //0 --light
-    { hex: '#53354a', ansi16: 35, dim: true }, //1
+    //1 & 5: muted mauves, lifted from #53354a/#472e40 (1.4-2.0:1 on the cells,
+    //illegible) into the readable range; no longer dimmed, same as style 10
+    { hex: '#a66e95', ansi16: 35 }, //1
     { hex: '#706c9d', ansi16: 34 }, //2
     { hex: '#54b0ed', ansi16: 94, bold: true }, //3 (web: bolder)
     { hex: '#00fdff', ansi16: 96 }, //4
-    { hex: '#472e40', ansi16: 35, dim: true }, //5
+    { hex: '#a7628b', ansi16: 35 }, //5
     { hex: '#fe95c6', ansi16: 95 }, //6
     { hex: '#999999', ansi16: 90 }, //7
     { hex: '#d2b48c', ansi16: 33 }, //8 tan
     { hex: '#ffdab9', ansi16: 93 }, //9 peachpuff
-    { hex: '#52423d', ansi16: 90, dim: true } //10 --dark
+    //10 --dark, the quiet tone: lightened from #52423d (under 2:1 on black)
+    //and no longer dimmed, so the 16-color tier can read it too
+    { hex: '#7d6a5f', ansi16: 90 } //10 --dark
 ] as const satisfies readonly StyleDef[];
 
 //packet chrome parity with fluidity.css (.site, .description, .bracket-*, .colon)

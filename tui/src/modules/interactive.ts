@@ -1,3 +1,4 @@
+import { RateBuckets, PULSE_WINDOWS, PULSE_BUCKETS } from '#@client/modules/pulse.js';
 import { follow, FollowHandle } from './transport.js';
 import { FilterSpec } from './filters.js';
 import { renderParts, RenderOpts } from './renderLine.js';
@@ -13,6 +14,9 @@ export interface InteractiveOpts {
     caps: TermCaps;
     showUrls?: boolean;
     historyLimit: number;
+    //spec §6: never connected and already reconnecting = unreachable at
+    //startup; called after the screen is torn down (app.ts prints + exit 2)
+    onStartupFailure: () => void;
 }
 
 const REPAINT_MS = 50; //batching budget from SPEC.md §7 (the Pi console scrolls slowly)
@@ -26,12 +30,17 @@ export const runInteractive = (o: InteractiveOpts, onQuit: () => void): FollowHa
     const st: UIState = initialState(out.columns || 80, out.rows || 24, o.base.host, o.historyLimit);
     st.filters = o.filters;
 
+    //rate strip: all windows accumulate in parallel (web parity); live
+    //packets only - the history backfill would fake a burst
+    const tracks = PULSE_WINDOWS.map(win => new RateBuckets(win.bucketMs, PULSE_BUCKETS, Date.now()));
+
     let dirty = true;
     let timer: NodeJS.Timeout | undefined;
 
     const repaint = (): void => {
         if (!dirty) return;
         dirty = false;
+        st.rateSeries = tracks[st.pulseWindowIdx]?.series(Date.now()) ?? [];
         drawFrame(out, composeFrame(st, caps));
     };
 
@@ -43,8 +52,12 @@ export const runInteractive = (o: InteractiveOpts, onQuit: () => void): FollowHa
         }, REPAINT_MS);
     };
 
+    //quiet networks still need the strip to scroll and liveness to decay
+    const slowTick = setInterval(() => scheduleRepaint(), 5000);
+
     const cleanup = (): void => {
         if (timer) clearTimeout(timer);
+        clearInterval(slowTick);
         process.stdin.setRawMode?.(false);
         process.stdin.pause();
         leaveScreen(out);
@@ -80,28 +93,50 @@ export const runInteractive = (o: InteractiveOpts, onQuit: () => void): FollowHa
         scheduleRepaint();
     });
 
-    process.on('SIGINT', quit);
-    process.on('SIGTERM', quit);
+    //spec §6: exit 2 if the server is unreachable at startup; once a
+    //connection has ever succeeded, retry forever (stream-mode parity)
+    let everConnected = false;
 
     const handle = follow(
         o.base,
         { ...(o.insecure !== undefined ? { insecure: o.insecure } : {}) },
         {
+            //slice(-0) is slice(0): an explicit guard so --history 0 means none
             onHistory: packets =>
-                packets.slice(-o.historyLimit).forEach(p => {
+                (o.historyLimit === 0 ? [] : packets.slice(-o.historyLimit)).forEach(p => {
                     addPacket(st, p, renderParts(p, render));
                     scheduleRepaint();
                 }),
             onPacket: p => {
+                const now = Date.now();
+                tracks.forEach(t => t.note(now));
                 addPacket(st, p, renderParts(p, render));
                 scheduleRepaint();
             },
             onState: state => {
+                if (state === 'live') everConnected = true;
+                if (state === 'reconnecting' && !everConnected) {
+                    //restore the terminal before app.ts writes the error
+                    handle.stop();
+                    cleanup();
+                    o.onStartupFailure();
+                    return;
+                }
                 st.conn = state;
+                scheduleRepaint();
+            },
+            onMalformed: total => {
+                st.malformed = total;
                 scheduleRepaint();
             }
         }
     );
+
+    //registered only now that `handle` exists: quit() calls handle.stop(), so
+    //wiring these earlier let a Ctrl+C during startup hit the temporal dead
+    //zone (ReferenceError, skipped cleanup)
+    process.on('SIGINT', quit);
+    process.on('SIGTERM', quit);
 
     scheduleRepaint();
     return handle;

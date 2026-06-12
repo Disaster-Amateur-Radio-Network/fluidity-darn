@@ -117,16 +117,16 @@ default palette on a dark background:
 | style | web CSS | truecolor | 16-color ANSI | attrs |
 |---|---|---|---|---|
 | 0 | `--light` | `#ffe5ff` | white (97) | |
-| 1 | `--color1` | `#53354a` | magenta (35) | dim |
+| 1 | `--color1` | `#a66e95` | magenta (35) | |
 | 2 | `--color2` | `#706c9d` | blue (34) | |
 | 3 | `--color3` | `#54b0ed` | bright blue (94) | **bold** (web uses `bolder`) |
 | 4 | `--color4` | `#00fdff` | bright cyan (96) | |
-| 5 | `--color5` | `#472e40` | magenta (35) | dim |
+| 5 | `--color5` | `#a7628b` | magenta (35) | |
 | 6 | `--color6` | `#fe95c6` | bright magenta (95) | |
 | 7 | `--color7` | `#999999` | bright black (90) | |
 | 8 | `--color8` | `tan` (#d2b48c) | yellow (33) | |
 | 9 | `--color9` | `peachpuff` (#ffdab9) | bright yellow (93) | |
-| 10 | `--dark` | `#52423d` | bright black (90) | dim |
+| 10 | `--dark` | `#7d6a5f` | bright black (90) | |
 
 Chrome roles (timestamp, brackets, site, description, separators) get their
 own theme entries derived the same way from `fluidity.css`.
@@ -188,8 +188,17 @@ Default when stdout is a TTY. Alternate screen buffer, restored on exit.
 - **Bottom pane (full width): who is reporting in.** Lists sites (or
   collectors — Tab switches) in first-seen order with live packet counts,
   each numbered `[1]`-`[9]` for direct filter toggling. Selected entries
-  are highlighted (bold/underline cyan; `*`-marked in mono). Overflow shows
+  are highlighted (bold/underline brand pink, matching the web's
+  "pink = active"; `*`-marked in mono). Each site carries a liveness mark
+  (web parity, shape + color so mono still reads): `*` reporting within
+  ~2.5 min (brand pink — alive), `~` quiet up to ~7.5 min (peach), `.`
+  silent (dim). Overflow shows
   `+N more`. Sites render uppercase (web parity).
+- **Header rate strip**: spare header width renders packet rate as a
+  CP437-safe shade ramp (`░▒▓█`) in the brand accent — the web sparkline's
+  console counterpart. `w` cycles 5m/1h/24h (60 buckets each, accumulating
+  in parallel); shared RateBuckets/window logic from the client module.
+  Omitted when the terminal is too narrow.
 - Hints line: the active keybindings + current filter count.
 
 ### 4.5 Keybindings (interactive, as built)
@@ -200,6 +209,7 @@ Default when stdout is a TTY. Alternate screen buffer, restored on exit.
 | `1`–`9` | toggle the filter for the numbered item in the bottom pane |
 | `Tab` | switch the bottom pane between sites and collectors |
 | `x` | clear all filters |
+| `w` | cycle the header rate strip window (5m / 1h / 24h) |
 | `space` | pause/resume rendering (stream continues buffering; count shown) |
 | `j`/`k`, `↑↓`, `PgUp`/`PgDn` | scroll |
 | `g` / `G` | top / bottom (`G` re-enables auto-scroll) |
@@ -215,16 +225,23 @@ jsdom tests pin for `FilterManager`.
 
 ## 5. Transport
 
-- **History**: `GET /FIFO` on startup → render, remember highest `seq` as
-  demarcation (web parity).
+- **History**: `GET /FIFO` on startup → render, remember each packet's
+  identity in a seen-set.
 - **Live**: `GET /SSE` (`Accept: text/event-stream`) via Node's built-in
   `fetch` streaming. Parser handles `retry:`, `id:`, `data:` lines (the
   reader we built for `routes.test.ts` is the reference implementation).
-  Packets with `seq <= demarc` are dropped (duplicate guard, web parity).
+- **Duplicate guard**: packet identity is the key `` `${seq}:${ts}` `` —
+  `seq` alone resets when the server restarts, so a bare seq watermark
+  would either replay or drop packets across a restart. The seen-set is
+  capped at 10k keys; on overflow the oldest half is evicted (insertion
+  order). Anything already in the set is dropped, whether it arrives via
+  `/FIFO` or `/SSE`.
 - **Reconnect**: exponential backoff 1s → 30s with jitter. The server does
   **not** replay missed events on reconnect (known hand-rolled SSE
-  limitation) — so on every reconnect: refetch `/FIFO`, merge by `seq`,
-  render only unseen packets. Connection state surfaces in the header.
+  limitation) — so on every reconnect: refetch `/FIFO` and filter it
+  through the same seen-set, rendering only unseen packets (this is also
+  what self-heals after a server restart: new `ts` values miss the set).
+  Connection state surfaces in the header.
 - **TLS**: `--insecure` skips chain verification (self-signed dev certs),
   mirroring the agent's `NODE_ENV=development` behavior. Never the default.
 - Auth: none — `/FIFO` and `/SSE` are public by design.
@@ -234,10 +251,11 @@ jsdom tests pin for `FilterManager`.
 ## 6. CLI
 
 ```
-fluidity-tui [options]
+fluidity-tui [server-url] [options]
 
-  --server URL        Fluidity service base URL
-                      (default: FLUIDITY_SERVER env, else https://localhost:3000)
+  server-url          Fluidity service URL, e.g. f-y.io or https://host:3000
+                      (scheme optional, defaults to https; forgiving parse)
+  --server URL        same as the positional server-url (compatibility alias)
   --follow            force stream mode even on a TTY
   --json              raw FluidityPacket NDJSON (implies stream mode)
   --site NAME         pre-filter by site (repeatable)
@@ -249,9 +267,13 @@ fluidity-tui [options]
   --version, --help
 ```
 
-Server resolution order: `--server` > `FLUIDITY_SERVER` >
+Server resolution order: positional `server-url` (or its `--server` alias —
+giving both, if they disagree, is an error) > `FLUIDITY_SERVER` >
 `https://localhost:3000` (the dev server default — supports the README's
-"everything on one box" getting-started flow).
+"everything on one box" getting-started flow). The URL is parsed forgivingly:
+surrounding whitespace and a stray leading `//` are tolerated, a missing scheme
+defaults to https, and `host:port` is not mistaken for a `scheme:path`; only
+http/https are accepted.
 
 TLS: verification is relaxed automatically for **loopback hosts only**
 (localhost, 127.0.0.1, ::1), with a one-line notice — the dev server ships
@@ -262,7 +284,7 @@ Env: `FLUIDITY_SERVER`, `NO_COLOR` (forces mono, per no-color.org),
 `FORCE_COLOR` (overrides non-TTY detection).
 
 Exit codes: 0 user quit · 1 bad args · 2 cannot reach server at startup
-(the error suggests `--server` if the default was used).
+(the error notes when the local default was used because no server was given).
 
 ---
 
@@ -285,9 +307,10 @@ Exit codes: 0 user quit · 1 bad args · 2 cannot reach server at startup
   never color-only.
 - SIGWINCH handled (resize). Terminal always restored on exit, including on
   crash (process `exit` hook resets alt buffer, cursor, raw mode).
-- Malformed SSE payloads are dropped with a status-line note, never a crash
-  (`isFfluidityPacket` guard on every packet — same boundary the server
-  enforces).
+- Malformed SSE payloads are dropped, counted, and surfaced — interactive
+  mode notes `malformed N` in the header status, stream mode warns on
+  stderr — never a crash (`isFfluidityPacket` guard on every packet, same
+  boundary the server enforces).
 
 ---
 

@@ -295,6 +295,372 @@ no `@ts-ignore` interop hacks left.
 > server + sim agent. Coverage gate adjusted to 78 lines (entry points
 > uncovered by design).
 
+## UDP ingest for microcontrollers (U1 ✅ · U2/U3 pending)
+
+> M5Stack/AVR/ARM devices publish packed structs over UDP to an agent
+> `udpStruct` collector, which validates/decodes and forwards over the
+> existing HTTPS path - the agent as protocol gateway, server untouched
+> (Heroku can't do UDP anyway). Full specification in `service/UDP-SPEC.md`
+> (wire format v1, SipHash auth option, validation/drop rules, sims,
+> firmware kit). All open questions resolved in the spec (§11).
+>
+> **U1 done.** `udpCodec.ts` — pure flu_packet_v1 encode/decode,
+> exact-length-or-drop, strict UTF-8, typed drop reasons in §6 order; wire
+> layout pinned byte-for-byte and fuzzed (10k random + 2k corruption, zero
+> decodes/crashes). `collectors/udpStruct.ts` — open mode, `siteFromPacket`
+> default true, ±24h device-clock policy (`bad-time` counted, re-stamped),
+> per-source log damping with a bounded source table, `dropCounts` surface,
+> U2 options refused at startup (never silently unauthenticated); rides
+> a new `sendPacket()` per-packet identity seam in the `DataCollector`
+> base (existing `send()` untouched). `sims/udpDeviceSim.ts` — seeded
+> 3-device fleet (`npm run sim:udp`, `--once`) whose packer is a
+> deliberately independent wire implementation, proven byte-identical to
+> the agent encoder in tests. 23 new tests incl. dgram→HTTPS e2e and a
+> through-the-socket fuzz barrage (paced: loopback UDP drops ~25% of an
+> unpaced burst — the loss-tolerance doctrine, observed live). Stanzas in
+> dev conf + conf-examples.
+>
+> **U2 done.** `sims/src/siphash.ts` — the repo's one SipHash-2-4
+> (BigInt, pure; device-side home because service→sims is the allowed
+> dependency direction), pinned to all 64 official reference vectors
+> (veorq/SipHash) fetched at implementation time; ~34k MACs/s measured
+> over max-size datagrams. Codec gains a `verifyMac` injection point at
+> exactly §6 step 5, so bad-mac masks downstream reasons (order pinned
+> both ways in tests); the codec stays key-free. Collector: open /
+> migration (`unsigned` counted, accepted) / MAC-required modes, any
+> misconfigured security option refuses to start; `replayWindow` strict
+> seq window over MAC-verified packets with coherent-reject re-anchor
+> (reboot costs one packet; limits documented in spec §4), bounded device
+> table failing open. Sim fleet signs with `--secret`; signed-fleet e2e
+> against a MAC-required collector passes. 147 tests, 80.7% lines.
+>
+> **U3 done (software-complete).** `firmware/fluidity_udp.h` — single
+> dependency-free header (C99/C11/Arduino C++): the packed struct with
+> compile-time offset asserts, big-endian targets refused at compile
+> time, flu_init/flu_set_field/flu_set_time/flu_wire_size, SipHash-2-4 +
+> flu_sign behind FLU_ENABLE_MAC (signed = always full struct, 237B).
+> Sketches: sims/arduino/udp-m5stack (ESP32, MAC mode, NTP) and
+> udp-avr-w5500 (Ethernet, open mode, compact, event+heartbeat). README
+> "UDP Devices" quickstart with a netcat first-packet validated live.
+> firmware/test/wirecheck.c + udpFirmware.test.ts host-compile the header
+> (-Wall -Wextra -Werror, gcc and clang) and pin C output byte-for-byte
+> against BOTH TypeScript implementations — three independent impls of
+> the wire format agree — plus C-vs-TS SipHash on the official-vector
+> inputs; skips without a cc (CI has one). Remaining ceremony: a real
+> M5Stack on a LAN with MAC mode (hardware in Sean's hands, not the
+> repo's). Consider tagging v2.1.0: UDP ingest + UI refresh + lightened
+> quiet tone are all unreleased in binaries.
+>
+> **Stress emitter + backpressure (post-U3 hardening).**
+> `sims/src/udpStressEmitter.ts` (`npm run sim:udp-stress`) - rate-
+> controlled, count-exact, seed-deterministic barrage with a
+> valid/garbage/tampered/unsigned mix, for load testing and counter
+> reconciliation. It exposed a real hazard: the HTTPS throttle queues
+> without bound, so a sustained flood of *valid* packets grew agent
+> memory forever. udpStruct now keeps a bounded in-flight backlog
+> (`max(32, 2x maxHttpsReqPerCollectorPerSec)`) and sheds the newest
+> packet beyond it, counted as `backpressure` (spec s6 step 9);
+> `sendPacket()` returns its settle promise so collectors can bound
+> in-flight work. Tests: 1500pps mixed barrage with drop-counter
+> reconciliation (generous floors - loopback UDP sheds under load),
+> 800pps valid flood proving shedding + bounded publishing + survival,
+> seeded determinism, config validation. The bound was then HOISTED into
+> the DataCollector base (dispatch()), because the hazard was never
+> UDP-specific: genericSerial forwards every line, so line noise on a
+> serial port (~80+ lines/s vs the default 2/s throttle) or a tight
+> poller grows the same queue. All collectors now shed at the same
+> bound; backpressureShed is observable on every collector and a
+> synchronous 500-line flood test pins the arithmetic exactly (100
+> admitted, 400 shed).
+
+## E2E load + profiling session (findings + fixes)
+
+> A heavy multi-process slam (parallel emitters, in-process server +
+> agent + SSE subscribers, CPU profiles, decode microbench) was run and
+> then productized as `npm run loadtest` (service/src/loadtest/{harness,
+> cli}.ts; silent conf at service/dist/loadtest/conf). The harness core
+> is covered functionally in CI by udpEmission.test.ts. Findings, each
+> fixed and committed:
+> - **Browser hung under a live flood** while the TUI sailed through:
+>   index.ts did synchronous per-packet DOM work on every SSE message.
+>   Fixed with a requestAnimationFrame render pump (modules/rxPump.ts,
+>   drainRenderQueue) - bounded inserts/frame, oldest backlog shed past a
+>   cap, sparkline still counts every arrival. Verified 0/22 unresponsive
+>   probes at 6000/s (was a hard hang).
+> - **Typewriter trailed the data** above ~6/s: rate-aware bypass in
+>   FluidityUI (trailing-1s window) renders instant past the threshold.
+> - **MAC mode was the ingest ceiling** (~60k/s vs ~1.06M/s unsigned):
+>   BigInt SipHash allocated per op. Rewrote over 32-bit limbs - ~6x
+>   faster (~370k/s signed decode), still pinned to all 64 vectors + the
+>   C firmware cross-check.
+> - **In-flight backlog scaled as 2x throttle, no ceiling** -> ~1.6GB RSS
+>   at a 100k throttle in the slam. Hard-capped at 1024 posts.
+> Decode ceilings (single core, microbench): garbage reject 115M/s, valid
+> decode 1.06M/s, signed decode+MAC 370k/s. Loopback kernel rmem (208KB,
+> unraisable here) sheds before the agent at extreme offered rates - a
+> realistic first line of defense; the agent processes what the socket
+> delivers with the loop near idle. Observed SSE fanout tail latency
+> climbs under heavy post rate in a shared loop (separate processes in
+> prod); noted, not yet addressed.
+
+**Comprehensive review remediation (2026-06-12):** a full-codebase
+multi-agent review surfaced 56 verified findings; all addressed in one
+branch pass. Highlights, by theme:
+> - **Boundary contract tightened** (`shared/types.ts`): `isFfluidityPacket`
+>   now validates `ts` and `formattedData` element shapes (a `[null]`
+>   element used to permanently kill the dashboard's rAF render pump);
+>   `isFluidityLink` requires http(s) and rejects control bytes
+>   (javascript:-href XSS in the web client, OSC 8 escape injection in the
+>   TUI). New shared helpers: `stripControlChars` (C0+DEL+**C1**),
+>   `decodeSuggestStyle` (the >=100 trim convention, now applied uniformly
+>   to STRING/LINK/DATE in both clients), `isApiKeyFormat`.
+> - **Agent resilience:** HTTPS posts carry a 10s timeout (a black-holed
+>   target used to wedge pendingPosts and shed 100% forever); serial ports
+>   get error/close handlers + 5s reopen retry (USB unplug used to kill the
+>   feed silently); polling loops survive a throwing poll and validate
+>   `pollIntervalSec >= 1`; uncaught exceptions now exit(1) (crash-only)
+>   instead of leaving a half-dead process; `send()` builds exact packets
+>   (config stanza keys no longer leak to unauthenticated SSE clients);
+>   `_reqJSON` keeps the query string; GET bodies decode as streams;
+>   TLS verification relaxes only for loopback in dev (was: env-global).
+> - **UDP ingest:** replay re-anchor hardened (captured-pair anchor steal
+>   now costs 8 datagrams per steal or requires a boot-prefix capture;
+>   spec §4 updated honestly); missing-MAC policy moved into the codec at
+>   spec §6 step 5 (drop attribution fixed); decoder trims sender width
+>   truncation mid-codepoint instead of blacking out the device; C1
+>   controls stripped.
+> - **Server:** SSE broadcast evicts clients whose buffer exceeds 1MiB +
+>   30s heartbeat (stalled-reader OOM); TLS decided by key material alone
+>   (PORT-from-env no longer silently downgrades to plaintext, half-config
+>   throws, startup failures exit non-zero); timing-safe API-key compare;
+>   PacketFIFO validates maxSize (string config value used to disable
+>   eviction via NaN) and honors 0; SSE `id:` now equals packet seq.
+> - **Clients:** dashboard always constructs the UI (empty/partly-bad FIFO
+>   used to blank it forever) and survives malformed SSE frames; filter
+>   seq-indexes pruned on eviction; per-batch (not per-packet) scroll/
+>   stats/liveness; Turkish-locale-proof lowercasing; `maxClientHistory`
+>   actually reaches the browser. TUI: full CSI parsing (Delete/F-keys no
+>   longer toggle filters), `--history 0` means none, chunk-safe UTF-8
+>   decode, code-point + wide-char-aware ANSI width math (O(n) sticky
+>   regex), cancelable reconnect backoff, malformed-payload status notes,
+>   interactive exit-2, `+N more` count overflow, `x` re-pins; SPEC §5/§6/§8
+>   updated.
+> - **Tooling:** loadtest cleans up on throw, nearest-rank percentiles,
+>   2xx-only post counting (the vacuous `agent.processed` alias removed);
+>   stress emitter/sim validate duration/port and honor the
+>   "(rejects never)" contract; shared `parseMix`/`cliArgs` kill four
+>   copy-pasted CLI parsers; dev-cert loading is cwd-independent
+>   everywhere; common_conf merge order fixed (env wins); ENOENT
+>   diagnostics resolve against cwd; dead exports removed.
+> Known accepted limits: hamLive marks nets notified at enqueue (delivery
+> isn't observable from format()); SSE Last-Event-ID backfill is still
+> unimplemented (clients self-heal by refetch); the replay damper remains
+> a damper, not a transcript authenticator.
+
+## Log tailing + shared line tokenizer (L1/L2/L3 ✅ done)
+
+> **Shipped 2026-06-12.** `logTail` collector + `FileTailCollector` source
+> base (collectors.ts) + shared `modules/tokenize.ts`, all three phases.
+> - **L1 source:** poll-and-read-the-delta (no fs.watch), start-at-EOF default,
+>   rotation (identity change) / in-place truncation (size shrink) /
+>   copytruncate / partial-line / stream-UTF-8 handling, fleet throttle
+>   default, backpressure + dropCounts, oversize-line cap.
+> - **L2 tokenizer:** json / logfmt / syslog / levelmsg detectors + auto, the
+>   PLAN palette mapping, http(s)→LINK (control-safe so the server can't 400
+>   it), user regex rules, ReDoS guards (line cap, bounded/anchored patterns).
+>   Shared by `logTail` (on by default) and `genericSerial` (opt-in); a plain
+>   line still yields one style-0 STRING, so adoption is risk-free.
+> - **L3 multiline:** indent or startPattern entry detection, coalesced into
+>   one packet; flush on next-entry / idle / rotation / stop; runaway cap.
+>   Joiner defaults to `\n` (faithful data); single-line renderers flatten it
+>   until clients render multi-line packets (the deferred client follow-on).
+> - **Cross-OS:** file identity falls back from inode to creation time
+>   (Windows/FAT report ino 0), size-shrink as the last-resort reset signal,
+>   leading-BOM stripping. `logTailCrossOS.test.ts` emulates each OS's stat
+>   behavior via a `statFile()` seam so the gotchas surface on Linux CI.
+> Deferred: a `log://` dev-sim source (tests drive real temp files today);
+> true multi-line rendering in the clients.
+>
+> Original design notes below.
+
+> The most universal collector: tail a growing file and turn each line into a
+> styled FluidityPacket. The key design move is that the **source** (file
+> tail) and the **tokenizer** (line → styled fields) are orthogonal — the
+> tokenizer is a reusable module any line-oriented collector opts into, so
+> `genericSerial` watching a chatty console gets the same rich coloring. It
+> fits the core rule perfectly: the tokenizer *suggests* `fieldType`/
+> `suggestStyle` per token; the clients still decide CSS vs ANSI. No client
+> change — a tokenized line is just a multi-field packet, exactly the shape
+> srsSerial already emits (heading + per-port states), which both renderers
+> already lay out as a sequence of styled segments.
+>
+> **Resolved decisions (settled before code):**
+> 1. **Source/tokenizer split.** New `modules/tokenize.ts` exposes
+>    `tokenize(line, opts) → FormattedData[]`, built on the existing
+>    `FormatHelper` (`fh.e(text, style)` / `DATE` / `LINK`). New file-tail
+>    *source* is a base alongside SerialCollector/PollingCollector; `logTail`
+>    = file-tail source + tokenizer. genericSerial keeps its source, gains the
+>    tokenizer as an option.
+> 2. **Per-source defaults.** Tokenizer is **off by default for
+>    genericSerial** (arbitrary, possibly binary serial data — silent
+>    tokenizing could mangle it; opt in via `extendedOptions.tokenize`) and
+>    **on/auto for logTail** (logs by definition).
+> 3. **Graceful fallback == today's behavior.** A line the detector can't
+>    classify is emitted whole as one `STRING` at style 0 — exactly what
+>    genericSerial does now. Turning tokenization on can never render *worse*
+>    than raw, only better. (Makes adoption risk-free.)
+> 4. **Config surface:** `extendedOptions.tokenize` = `true` | `false` |
+>    `{ format: 'auto'|'json'|'logfmt'|'syslog'|'levelmsg'|'raw',
+>    rules?: [{ match, style, fieldType? }] }`. Built-in detectors cover the
+>    common formats; user regex rules handle the long tail.
+> 5. **First-cut category → palette mapping** (11 slots, 0–10, + the ≥100
+>    trim convention; level coloring is the anchor, the rest is secondary and
+>    up for debate in implementation):
+>    - ERROR/FATAL/PANIC → 6 (pink) + trim (106) · WARN → 9 (peach) ·
+>      INFO → 0 (light) · DEBUG/TRACE → 7 (gray)
+>    - timestamp → `DATE` fieldType · logger/source → 2 (periwinkle) ·
+>      ip/host → 3 (blue) · number/metric → 4 (cyan) · path/url → `LINK`
+>    - `key=` → 7 (dim) / value → 0 · message/quoted body → 0
+>
+> **L1 — robust file-tail source (line-as-one-STRING, no tokenizer yet).**
+> The unglamorous-but-load-bearing infra, nailed in isolation: follow appended
+> bytes; **start at EOF by default** (opt-in replay, or a flood on a big
+> existing file); handle file-not-yet-existing, **rotation** (logrotate
+> rename+recreate → inode change → reopen by path), **in-place truncation**
+> (size shrinks → reset to offset 0), and **partial lines** at a read
+> boundary. Decode as a UTF-8 *stream* (never per-chunk `toString` — the same
+> bug class fixed in transport.ts/collectors.ts). Size-poll-and-read-the-delta
+> rather than fs.watch (unreliable cross-platform; stay dependency-free).
+> Inherits the base backpressure shed + `dropCounts`, and a **fleet-style
+> throttle default** (a busy log easily does thousands of lines/s — apply the
+> udpStruct lesson, not the base 2/s). A `log://` (or `file://`) sim source +
+> a fixture log makes it testable without real files, à la `sim://srs`.
+> *Accept:* tail a fixture through rotation + truncation with zero lost/dup
+> lines and no mojibake on a multibyte char split across reads; start-at-EOF
+> proven; a golden-capture test pins behavior (goldenCapture.test.ts pattern).
+>
+> **L2 — the shared tokenizer.** `modules/tokenize.ts` with built-in
+> detectors for JSON-lines, logfmt, syslog, and the generic
+> `LEVEL timestamp message` shape; the category→palette mapping above;
+> `DATE`/`LINK` promotion; optional user regex rules. genericSerial opts in;
+> logTail defaults on. **ReDoS guardrails from day one:** anchored/bounded
+> patterns, a hard line-length cap *before* tokenizing, a per-line work
+> budget — logs are untrusted input. *Accept:* each detector pins a fixture
+> line → exact FormattedData (a goldenCapture-style table); an adversarial
+> line (pathological + huge + control chars) tokenizes within budget and
+> never injects escapes (the renderers sanitize, but the tokenizer must not be
+> the hole); the unclassifiable line falls back to whole-line style 0.
+>
+> **L3 — multiline (optional, deferrable).** Stack traces / pretty-printed
+> JSON spanning lines: continuation detection (leading whitespace, or a
+> configurable start-of-entry pattern), coalesced into one packet. Every log
+> shipper has a fiddly "multiline" config; line-per-packet is correct for most
+> logs, so this is a fair deferral until a real need.
+
+## Watcher — pattern alerting via a server subscriber (W1/W2/W3 — done)
+
+> **Status (2026-06-12): built and tested.** `service/src/watcher/` is a
+> standalone SSE subscriber — `npm run start:watcher`, own config under
+> `service/dist/watcher/conf/` (example in `conf-examples/`). W1 = `sseFollow`
+> (reconcile `/FIFO` + seq/ts dedup, jittered backoff reconnect, connection
+> state) → W2 = `PatternMatcher` (pure, connection-gated silence judged by
+> packet `ts`, reconcile-without-arming) → W3 = `AlertRunner` (concurrency cap
+> + shed queue, per-rule cooldown/coalesce, token bucket, exec timeout, circuit
+> breaker; `shell:false` + clean PATH+FLU_* env so untrusted packet text is
+> inert; `dryRun`). All acceptance criteria covered by `tests/` (rules, matcher
+> fake-clock, runner protections + a real-spawn injection test, sseFollow
+> against a live `makeApp` server). Deferred items below still stand.
+>
+> Register patterns of interest and, when a pattern fires at a frequency (a
+> storm) or a heartbeat goes silent for a duration, exec a registered program
+> with a configured message on stdin (first use: NTFY on a missing heartbeat /
+> a problematic pattern). The whole thing is a **standalone subscriber**, not
+> code in the server.
+>
+> **Why a subscriber, not in the server (resolved):** a watchdog must be
+> independent of what it watches. An in-server matcher dies with the server -
+> the one moment you most want an alert - whereas a separate process survives
+> the server's death and can alert "the server/agent went dark." It also
+> quarantines the exec/fork-bomb risk from the hardened ingest path, keeps the
+> "server relays, never interprets" doctrine intact, and is just another SSE
+> consumer (like the dashboard, the TUI, and the loadtest harness). The one
+> cost - absence detection over a lossy feed - is handled (see W2).
+>
+> **Resolved decisions (proposed defaults; cheap to revisit before code):**
+> 1. **Standalone component** `service/src/watcher/`, `npm run start:watcher`,
+>    its own config. Runs alongside the server (typically same host so exec'd
+>    scripts and NTFY egress are local).
+> 2. **Rule shape** = selector + trigger + action:
+>    ```jsonc
+>    { "name": "greenhouse-heartbeat", "enabled": true,
+>      "match": { "site": "greenhouse" },              // site/plugin equality + optional text regex
+>      "trigger": { "type": "silence", "window": "120s" },
+>      "exec": "/etc/fluidity/alerts/ntfy.sh",
+>      "message": "{{site}} silent for {{window}} (last seen {{lastSeen}})",
+>      "cooldown": "10m", "recover": true }
+>    ```
+>    Triggers: `silence` (no match for window → fire; the heartbeat/dead-man
+>    case) and `frequency` (matches in a rolling window cross a count → fire;
+>    the storm case). Under-frequency = `silence` with window = expected
+>    cadence (no third comparator in v1).
+> 3. **Selector reach (v1):** `site`/`plugin` equality + an optional
+>    length-capped, anchored regex over the joined field text. `rawData` /
+>    per-field matching deferred.
+> 4. **Absence re-fire (v1):** fire once on going-silent, once on `recover`;
+>    not every window while down.
+> 5. **State (v1):** in-memory; bootstrap last-seen from `/FIFO` at startup
+>    with a grace period; reset on restart, logged. No persistence yet.
+> 6. **Decomposition for shells:** stdin = the rendered `message` template
+>    (`{{site}}`,`{{plugin}}`,`{{ts}}`,`{{text}}`,`{{seq}}`,`{{count}}`,`{{rule}}`;
+>    optional `format:"json"` for jq); env = `FLU_SITE/PLUGIN/DESCRIPTION/TS/
+>    SEQ/TEXT/RAW/RULE/REASON/COUNT`. **`shell:false`, args array, minimal
+>    clean env** (PATH + FLU_* only - the server's TLS/API-key env is never
+>    inherited): untrusted packet content reaches the child as data, never as
+>    a command string.
+>
+> **W1 — the subscriber + shared SSE-follow.** Factor a small headless
+> SSE-follow client (connect, reconnect with backoff, `/FIFO` reconcile +
+> seq/ts dedup, connection-state events) out of the three existing consumers
+> (tui transport.ts, dashboard EventSource, loadtest harness) and reuse it.
+> The watcher process consumes it and exposes a connection state (healthy /
+> blind). *Accept:* the watcher follows a live server, survives a server
+> restart (self-heals via `/FIFO`), and reports blind vs healthy; a fake
+> server drop is observable to the matcher.
+>
+> **W2 — PatternMatcher (pure, injectable clock).** Compiled rules;
+> `observe(packet)` updates per-rule rolling windows (`frequency`) and
+> last-seen timers (`silence`); emits `Fire { rule, reason:
+> match|silence|recover, packet?, count, context }`. **Connection-aware
+> absence:** suspend `silence` evaluation while blind (no false "down" from a
+> dropped pipe; optional one "monitoring lost the server" meta-alert), and on
+> reconnect/startup reconcile last-seen from `/FIFO` packet timestamps (not
+> "now"). Absence is judged against the packet `ts`, not local arrival.
+> ReDoS-bounded selectors (line cap + anchored patterns, the tokenizer
+> discipline). *Accept:* fake-clock tests pin a storm firing at the threshold,
+> a silence firing after the window + a recover, NO false silence across a
+> simulated disconnect, and correct reconciliation from a `/FIFO` snapshot.
+>
+> **W3 — AlertRunner (bounded exec pool + protections).** `fire(event)` ->
+> bounded queue -> spawn (`shell:false`, clean env, FLU_* env, templated
+> stdin) -> timeout (SIGTERM→SIGKILL) -> exit handling. Anti-fork-bomb: a
+> global **concurrency cap** (the hard ceiling), a **bounded queue that sheds
+> and counts** past it (the collector-backpressure pattern), output bounding.
+> Anti-message-bomb: per-rule **cooldown + coalescing** (suppressed matches
+> counted into the next message - the drop-damping pattern; the primary NTFY
+> guard), a per-rule **token bucket**, and a **failure circuit-breaker** that
+> parks a rule whose script keeps failing/timing out. Plus `dryRun` (log what
+> would fire, no exec), per-rule `enabled:false`, and misconfiguration
+> (bad regex / missing-or-non-executable `exec` / nonsensical window) **throws
+> at startup**, never warn-and-run-broken. *Accept:* against an echo script -
+> stdin/env are correct; the cap holds at K under a burst; cooldown coalesces;
+> a hung script is killed at the timeout; and an **injection test** (a packet
+> whose text is `$(touch pwned); rm -rf` reaches the child as inert bytes,
+> nothing executed).
+>
+> Deferred: SSE/`/FIFO` auth (read-only and unauthenticated today - fine for a
+> local watcher, needed if it runs off-box); persisted alert state; richer
+> selectors (rawData, per-field, boolean combinations).
+
 ## Deferred / known hazards (not in scope, tracked so they're not forgotten)
 
 - **`dist/` layout:** configs, EJS views, and TLS certs live under

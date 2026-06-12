@@ -1,5 +1,6 @@
 import { fetchLogger } from '#@shared/modules/logger.js';
 import https from 'https';
+import http from 'http';
 import fs from 'fs';
 import { confFromFS } from '#@shared/modules/fluidityConfig.js';
 import { prettyFsNotFound } from '#@shared/modules/utils.js';
@@ -14,18 +15,23 @@ try {
     if (typeof conf.appName !== 'string') {
         throw new Error(`appNaming missing from config`);
     }
-    if (conf['tlsKey'] && conf['tlsCert'] && conf.port) {
-        https
-            .createServer({
+    if (Boolean(conf['tlsKey']) !== Boolean(conf['tlsCert'])) {
+        throw new Error('tlsKey and tlsCert must be configured together');
+    }
+    const useTls = Boolean(conf['tlsKey'] && conf['tlsCert']);
+    const server = useTls
+        ? https.createServer({
             key: fs.readFileSync(conf['tlsKey']),
             cert: fs.readFileSync(conf['tlsCert'])
         }, app)
-            .listen(conf.port);
-    }
-    else {
-        app.listen(PORT);
-    }
-    log.info(`${conf.appName} ${conf.appVersion ?? ''} server listening on port: ${PORT}`);
+        : http.createServer(app);
+    server.on('error', err => {
+        log.error(`server failed to start on port ${PORT}: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+    });
+    server.listen(PORT, () => {
+        log.info(`${conf.appName} ${conf.appVersion ?? ''} server listening on port: ${PORT} (${useTls ? 'https' : 'http'})`);
+    });
 }
 catch (err) {
     if (err instanceof Error) {
@@ -35,4 +41,5 @@ catch (err) {
     else {
         log.error(err);
     }
+    process.exitCode = 1;
 }

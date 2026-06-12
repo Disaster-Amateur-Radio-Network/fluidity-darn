@@ -18,6 +18,18 @@ void test('ansiText: visible length and truncation ignore SGR sequences', () => 
     assert.equal(padEndAnsi('ab', 4), 'ab  ');
 });
 
+void test('ansiText: CJK and emoji are two columns; truncation never splits a glyph', () => {
+    assert.equal(visibleLength('漢字'), 4);
+    assert.equal(visibleLength('a漢b'), 4);
+    assert.equal(visibleLength('🙂'), 2, 'astral emoji: two code units, one wide glyph');
+    assert.equal(truncateAnsi('漢字', 3), '漢', 'wide char straddling the boundary is excluded');
+    assert.equal(truncateAnsi('ab漢字', 4), 'ab漢');
+    assert.equal(truncateAnsi('🙂x', 2), '🙂');
+    assert.equal(truncateAnsi('🙂', 1), '', 'never emits a lone surrogate');
+    assert.equal(padEndAnsi('漢', 4), '漢  ');
+    assert.equal(visibleLength(padEndAnsi('\x1b[96m漢字\x1b[0m site', 16)), 16);
+});
+
 void test('keys: parses vim keys, arrows, page keys, digits and controls', () => {
     assert.deepEqual(parseKeys(Buffer.from('q')), [{ name: 'quit' }]);
     assert.deepEqual(parseKeys(Buffer.from('\x03')), [{ name: 'quit' }]);
@@ -33,6 +45,15 @@ void test('keys: parses vim keys, arrows, page keys, digits and controls', () =>
         { name: 'tab' }
     ]);
     assert.deepEqual(parseKeys(Buffer.from('3')), [{ name: 'digit', digit: 3 }]);
+    assert.deepEqual(parseKeys(Buffer.from('w')), [{ name: 'window' }]);
+});
+
+void test('keys: unbound CSI sequences are consumed whole, never re-parsed as keystrokes', () => {
+    assert.deepEqual(parseKeys(Buffer.from('\x1b[3~')), [], 'Delete must not toggle filter 3');
+    assert.deepEqual(parseKeys(Buffer.from('\x1b[15~')), [], 'F5 must not toggle 1 and 5');
+    assert.deepEqual(parseKeys(Buffer.from('\x1b[1;5A')), [], 'Ctrl-Up must not toggle or scroll');
+    assert.deepEqual(parseKeys(Buffer.from('\x1b[3~q')), [{ name: 'quit' }], 'scanning resumes after the sequence');
+    assert.deepEqual(parseKeys(Buffer.from('\x1b[1;5')), [], 'chunk ending mid-sequence emits nothing');
 });
 
 const pkt = (seq: number, site: string, plugin = 'srsSerial'): FluidityPacket => ({
@@ -79,8 +100,10 @@ void test('digit keys toggle the numbered site filter; Tab switches groups', () 
     assert.deepEqual(st.filters.collectors, ['genericSerial']);
     assert.equal(visibleEntries(st).length, 1);
 
+    st.scrollOffset = 2;
     handleKey(st, { name: 'clear' });
     assert.deepEqual(st.filters, { sites: [], collectors: [] });
+    assert.equal(st.scrollOffset, 0, 'clear re-pins auto-scroll like a filter change');
 
     //out-of-range digit is a no-op
     handleKey(st, { name: 'digit', digit: 9 });
@@ -143,6 +166,49 @@ void test('viewport columns align to the widest seen site/description', () => {
     //shorter site is padded out to the widest
     const loopCyn = body.find(l => l.includes('LOOP CYN'));
     assert.ok(loopCyn?.includes('LOOP CYN  ('), `site column padded: ${loopCyn ?? ''}`);
+});
+
+void test('rate strip renders in the header and w cycles its window', () => {
+    const st = populated();
+    st.rateSeries = [0, 2, 5, 1, 0, 3];
+
+    let frame = composeFrame(st, MONO);
+    const header = frame[0] ?? '';
+    assert.ok(header.includes('['), 'strip brackets present');
+    assert.ok(header.includes('█'), 'peak cell rendered');
+    assert.ok(header.includes(']5m'), 'window label shown');
+    assert.ok((frame[st.rows - 1] ?? '').includes('[w] 5m'), 'hint shows the window key');
+
+    handleKey(st, { name: 'window' });
+    frame = composeFrame(st, MONO);
+    assert.ok((frame[0] ?? '').includes(']1h'));
+    handleKey(st, { name: 'window' });
+    assert.equal(st.pulseWindowIdx, 2);
+    handleKey(st, { name: 'window' });
+    assert.equal(st.pulseWindowIdx, 0, 'wraps back to 5m');
+
+    //narrow terminals omit the strip rather than corrupt the header
+    st.cols = 40;
+    const narrow = composeFrame(st, MONO)[0] ?? '';
+    assert.ok(!narrow.includes('['), 'no strip when there is no room');
+});
+
+void test('site entries carry liveness marks; selected pills keep the mono marker', () => {
+    const st = populated(); //packet ts 2026-06-11T12:00Z - long stale vs real now
+    st.siteLastSeen.set('Verdugo Pk', Date.now()); //this one is reporting right now
+
+    const frame = composeFrame(st, MONO);
+    const pane = frame[st.rows - 2] ?? '';
+    assert.ok(pane.includes('*[1]VERDUGO PK'), 'fresh site marked *');
+    assert.ok(pane.includes('.[2]LOOP CYN'), 'quiet site marked .');
+
+    handleKey(st, { name: 'digit', digit: 1 });
+    const selected = composeFrame(st, MONO)[st.rows - 2] ?? '';
+    assert.ok(selected.includes('*[1]VERDUGO PK'), 'liveness mark survives selection');
+
+    //mono frames stay escape-free with marks and strip present
+    st.rateSeries = [1, 2, 3];
+    assert.ok(!composeFrame(st, MONO).join('').includes('\x1b'));
 });
 
 void test('composeFrame: scrolling and help overlay', () => {

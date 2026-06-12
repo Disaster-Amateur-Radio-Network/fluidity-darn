@@ -3,16 +3,19 @@ import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { detectCaps, ColorMode } from './modules/caps.js';
 import { shouldVerifyTLS, FollowHandle } from './modules/transport.js';
+import { normalizeServerUrl } from './modules/serverUrl.js';
 import { runStream } from './modules/stream.js';
 import { runInteractive } from './modules/interactive.js';
 
 const HELP = `fluidity-tui - terminal client for Fluidity
 
-Usage: fluidity-tui [options]
+Usage: fluidity-tui [server-url] [options]
 
-  --server URL        Fluidity service base URL
-                      (default: FLUIDITY_SERVER env, else https://localhost:3000)
-  --follow            force stream mode (currently the only mode)
+  server-url          Fluidity service URL, e.g. f-y.io or https://host:3000
+                      (scheme optional, defaults to https; falls back to the
+                      FLUIDITY_SERVER env, else https://localhost:3000)
+  --server URL        same as the positional server-url (kept for compatibility)
+  --follow            force stream mode even on a TTY
   --json              raw FluidityPacket NDJSON output
   --site NAME         pre-filter by site (repeatable)
   --collector NAME    pre-filter by collector/plugin (repeatable)
@@ -29,9 +32,10 @@ const fail = (msg: string): never => {
 };
 
 const main = (): void => {
-    let args;
+    let parsed;
     try {
-        args = parseArgs({
+        parsed = parseArgs({
+            allowPositionals: true,
             options: {
                 server: { type: 'string' },
                 follow: { type: 'boolean', default: false },
@@ -45,10 +49,12 @@ const main = (): void => {
                 version: { type: 'boolean', default: false },
                 help: { type: 'boolean', default: false }
             }
-        }).values;
+        });
     } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));
     }
+    const args = parsed.values;
+    const positionals = parsed.positionals;
 
     if (args.help) {
         process.stdout.write(HELP);
@@ -80,14 +86,24 @@ const main = (): void => {
         return fail('--history must be a non-negative integer');
     }
 
-    const usedDefaultServer = !args.server && !process.env['FLUIDITY_SERVER'];
-    const serverRaw = args.server ?? process.env['FLUIDITY_SERVER'] ?? 'https://localhost:3000';
+    //the server URL is the first positional argument; --server stays as an
+    //alias so existing invocations keep working, but the two must not disagree
+    if (positionals.length > 1) {
+        return fail(`unexpected extra argument(s): ${positionals.slice(1).join(' ')}`);
+    }
+    const positionalServer = positionals[0];
+    if (positionalServer !== undefined && args.server !== undefined) {
+        return fail('specify the server once: as the first argument or with --server, not both');
+    }
+    const serverArg = positionalServer ?? args.server;
+    const usedDefaultServer = serverArg === undefined && !process.env['FLUIDITY_SERVER'];
+    const serverRaw = serverArg ?? process.env['FLUIDITY_SERVER'] ?? 'https://localhost:3000';
 
     let base: URL;
     try {
-        base = new URL(serverRaw);
-    } catch {
-        return fail(`invalid server URL: ${serverRaw}`);
+        base = normalizeServerUrl(serverRaw);
+    } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
     }
 
     if (base.protocol === 'https:' && !shouldVerifyTLS(base, args.insecure) && !args.insecure) {
@@ -95,6 +111,14 @@ const main = (): void => {
     }
 
     const caps = detectCaps(process.env, Boolean(process.stdout.isTTY), args.color as ColorMode);
+
+    //spec §6: cannot reach server at startup -> exit 2, suggesting a server
+    //argument when the default was used (shared by both modes)
+    const unreachable = (): never => {
+        process.stderr.write(`fluidity-tui: cannot reach ${base.href}`);
+        process.stderr.write(usedDefaultServer ? ' - no server given, tried the local default\n' : '\n');
+        return process.exit(2);
+    };
 
     //interactive on a real terminal; stream mode when piped or forced
     const interactive = Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY) && !args.follow && !args.json;
@@ -107,7 +131,8 @@ const main = (): void => {
                 filters: { sites: args.site, collectors: args.collector },
                 caps,
                 showUrls: args['show-urls'],
-                historyLimit: history
+                historyLimit: history,
+                onStartupFailure: unreachable
             },
             () => process.exit(0)
         );
@@ -133,11 +158,11 @@ const main = (): void => {
 
             if (state === 'reconnecting' && !everConnected) {
                 handle.stop();
-                process.stderr.write(`fluidity-tui: cannot reach ${base.href}`);
-                process.stderr.write(usedDefaultServer ? ' - no --server given, tried the local default\n' : '\n');
-                process.exit(2);
+                unreachable();
             }
-        }
+        },
+        //spec §8: malformed payloads are dropped but never silently
+        onMalformed: total => process.stderr.write(`fluidity-tui: malformed SSE payload dropped (total ${total})\n`)
     });
 
     const quit = (): void => {

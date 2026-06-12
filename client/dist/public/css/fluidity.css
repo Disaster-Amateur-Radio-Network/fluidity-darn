@@ -4,17 +4,51 @@
 
 
 :root {
-    --color1: #53354a;
+    /* packet palette - the suggestion contract (TUI parity, pinned by tests).
+       change only in lockstep with tui/src/modules/theme.ts STYLES */
+    /* 1 & 5 are the muted mauves (the palette's recessive plum pair); lifted
+       from #53354a/#472e40, which sat at 1.4-2.0:1 on the cells - illegible.
+       Same hue family, raised lightness: still the quiet end, now readable. */
+    --color1: #a66e95;
     --color2: #706c9d;
     --color3: #54b0ed;
     --color4: #00fdff;
-    --color5: #472e40;
+    --color5: #a7628b;
     --color6: #fe95c6;
     --color7: #999;
     --color8: tan;
     --color9: peachpuff;
     --light: #ffe5ff;
-    --dark: #52423d;
+    /* the quiet tone (all clear, closed): lightened from #52423d, which sat
+       under 2:1 on the graphite cells - receding is fine, unreadable is not */
+    --dark: #7d6a5f;
+
+    /* chrome tokens, derived from the logo: deep plum field #53354a,
+       pink->peach mark gradient #fe8dc6 -> #fed1c7.
+       color discipline: neutral chrome at rest - pink only carries meaning
+       (selected filter, attention); cyan stays the data-identity color */
+    /* graphite stage, periwinkle as shading (cool stage, warm trace):
+       neutral dark surfaces let the packet palette pop; the shading
+       family derives from --color2 - the same periwinkle that draws the
+       borders here and the rules in the TUI - so the only warm notes on
+       screen are the pink/peach accents (logo, sparkline, selection).
+       Plum retired from the chrome: it nearly matched the pink (analogous
+       hues) and read as a near-miss rather than a choice. */
+    --surface-page: #131316;
+    --surface-cell: #1d1d21;
+    --surface-cell-hi: #2b2945;
+    --shade-strong: #454270;
+    --accent-a: #fe8dc6;
+    --accent-b: #fed1c7;
+    --line: rgba(112, 108, 157, 0.32);
+    --chip: rgba(255, 255, 255, 0.055);
+    --chip-hover: rgba(255, 255, 255, 0.1);
+    --chip-active: rgba(254, 141, 198, 0.13);
+    --chip-active-ring: rgba(254, 141, 198, 0.4);
+    --icon-idle: rgba(255, 255, 255, 0.45);
+
+    --mono: ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+
     --small-gap: 0.5rem;
     --big-gap: 0.75rem;
 }
@@ -57,16 +91,35 @@
 }
 
 .bg-gradient {
-    background: rgb(83, 53, 74);
-    background: linear-gradient(90deg, rgba(83, 53, 74, 1) 75%, rgba(112, 76, 101, 1) 100%);
+    background: rgb(29, 29, 33);
+    /* 72% flat graphite, then a breath of periwinkle at the edge (the
+       original gradient device, now in the borders' own family) */
+    background: linear-gradient(90deg, var(--surface-cell) 72%, var(--surface-cell-hi) 100%);
 }
 
 body {
     color: var(--light);
-    background-color: var(--color2);
+    background-color: var(--surface-page);
+    background-image: radial-gradient(110rem 60rem at 85% -20%, #232136 0%, var(--surface-page) 60%);
+    background-attachment: fixed;
     font-size: 0.8rem;
     font-family: 'Outfit', sans-serif;
     font-weight: 300;
+    /* fill the viewport so the app (and the data stream) use the full height
+       instead of stopping ~3/4 down with dead background below. A DEFINITE
+       height (not min-height) is what bounds the grid's 1fr row so #cell-data
+       scrolls internally instead of growing the whole page; dvh tracks mobile
+       browser chrome, vh is the fallback. box-sizing:border-box (set on *)
+       means the breakpoint padding counts inside this height. */
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+}
+
+::selection {
+    background: var(--accent-a);
+    color: var(--surface-page);
 }
 
 .display-none {
@@ -83,6 +136,7 @@ body {
 
 a {
     text-decoration: none;
+    transition: color 0.15s ease;
 }
 
 a:link {
@@ -92,10 +146,16 @@ a:visited {
     color: var(--light);
 }
 a:hover {
-    color: var(--light);
+    color: var(--color9);
 }
 a:active {
     color: var(--color4);
+}
+
+a:focus-visible {
+    outline: 2px solid var(--color9);
+    outline-offset: 2px;
+    border-radius: 4px;
 }
 
 .fa-ul {
@@ -105,12 +165,82 @@ a:active {
 #logo {
     height: 3.25rem;
     margin: 0.25rem;
+    display: block;
+}
+
+#logo-link {
+    border-radius: 6px;
+    transition: filter 0.2s ease;
+}
+
+#logo-link:hover {
+    filter: drop-shadow(0 0 0.6rem rgba(254, 141, 198, 0.22));
+}
+
+/* live packet-rate sparkline (mobile keeps the header minimal);
+   clickable: cycles the time window (5m / 1h / 24h) */
+#pulse {
+    display: none;
+    cursor: pointer;
+}
+
+#pulse:focus-visible {
+    outline: 2px solid var(--color9);
+    outline-offset: 3px;
+    border-radius: 4px;
+}
+
+/* site liveness: bright while reporting, dimming as the site goes quiet */
+.live-dot {
+    display: inline-block;
+    width: 0.5em;
+    height: 0.5em;
+    border-radius: 50%;
+    margin-right: 0.35em;
+    vertical-align: 6%;
+    background: rgba(255, 255, 255, 0.18);
+    transition: background-color 0.4s ease, box-shadow 0.4s ease;
+}
+
+.live-dot--fresh {
+    /* the liveness arc cools as a site goes quiet: warm throbbing pink (alive,
+       part of the sparkline/cursor family) -> neutral solid white (idle, seen
+       recently) -> cool solid dark gray (offline). Loss of throb, then hue,
+       then brightness. */
+    background: var(--accent-a);
+    box-shadow: 0 0 6px rgba(254, 141, 198, 0.6);
+    animation: livePulse 2.4s ease-in-out infinite;
+}
+
+.live-dot--recent {
+    /* idle: solid, neutral white - present and clear, but no longer pulsing */
+    background: #e9ebf2;
+}
+
+.live-dot--stale {
+    /* offline: solid dark gray, dimmed but still a visible marker */
+    background: #4a4a54;
+}
+
+@keyframes livePulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.55;
+    }
 }
 
 #container-main {
     display: grid;
     gap: var(--small-gap);
     grid-template-columns: 99vw;
+    /* grow to fill the body's height; the content row (the rail + the message
+       column) takes the slack so the stream fills the screen */
+    grid-template-rows: auto 1fr;
+    flex: 1 1 auto;
+    min-height: 0;
     /* min-width: 23.4rem; */
 }
 
@@ -122,6 +252,9 @@ a:active {
     display: flex;
     flex-direction: column;
     gap: var(--small-gap);
+    /* lives in the grid's 1fr row; min-height:0 lets #cell-data scroll rather
+       than forcing the column to grow past the viewport */
+    min-height: 0;
 }
 
 #container-logo-and-spinner {
@@ -149,9 +282,65 @@ a:active {
 }
 
 #container-main li {
-    width: 9rem;
+    /* a pill is one non-breaking row: dot + name + icon. Long names
+       ellipsize instead of wrapping; min() keeps pills inside the rail */
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    width: fit-content;
+    max-width: 100%;
     font-size: 0.8rem;
     line-height: 1.2rem;
+    padding: 0.12rem 0.55rem;
+    border-radius: 999px;
+    background: var(--chip);
+    transition: background-color 0.15s ease, box-shadow 0.15s ease;
+    user-select: none;
+}
+
+#container-main li a.filter-link {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    /* uniform within a group: --label-ch is set by the FilterManager to the
+       widest current label, so all pills match; ellipsis is the backstop if a
+       proportional glyph run slightly exceeds the ch estimate */
+    width: var(--label-ch, auto);
+}
+
+#container-main li i,
+#container-main li .live-dot {
+    flex: none;
+}
+
+#container-main li:hover {
+    background: var(--chip-hover);
+}
+
+/* each pill is a toggle: the whole pill is the click target and selection
+   is a class set by the FilterManager (no x icon, no :has() needed) */
+#container-main li.filter-pill {
+    cursor: pointer;
+}
+
+#container-main li.filter-selected {
+    background: var(--chip-active);
+    box-shadow: inset 0 0 0 1px var(--chip-active-ring);
+}
+
+/* icon state ladder: quiet at rest, warms on hover, brand pink when selected */
+#container-main li i {
+    color: var(--icon-idle);
+    transition: color 0.15s ease;
+}
+
+#container-main li:hover i {
+    color: var(--color9);
+}
+
+#container-main li.filter-selected i {
+    color: var(--color6);
 }
 
 #container-main ul {
@@ -165,27 +354,39 @@ a:active {
     margin: 0 3px;
 }
 
+/* outside the dashboard chrome (about page lists), icons keep the brand pink */
 li i {
     color: var(--color6);
 }
 
-.fa-circle-xmark {
-    color: var(--color2);
-}
-
 #cell-sites li {
     margin-left: 10px;
+    margin-bottom: 0.35rem;
 }
 
+/* one line, no taller than a pill - so the bar's contents center cleanly
+   and still top-align with the site rail (same geometry either way) */
 #cell-stats {
     font-size: 0.8rem;
-    display: grid;
-    gap: 0.2rem;
-    grid-template-columns: 1fr 1fr;
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    white-space: nowrap;
+}
+
+#cell-stats .stat-name:not(:first-child) {
+    margin-left: 0.9rem;
+}
+
+.stat-name {
+    color: var(--color7);
 }
 
 .stat-data {
     color: var(--color3);
+    font-family: var(--mono);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
 }
 
 .stat-data-attention {
@@ -193,7 +394,38 @@ li i {
 }
 #cell-data {
     overflow: auto;
-    max-height: clamp(75vh, 72vh, 77vh);
+    /* fill the leftover height in the message column (was capped at ~75vh,
+       which left dead space at the bottom); min-height:0 keeps it scrollable */
+    flex: 1 1 auto;
+    min-height: 0;
+    scrollbar-gutter: stable;
+    /* the stream reads like a terminal; chrome stays Outfit */
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    line-height: 1.5;
+}
+
+/* terminal cursor after the newest packet: fixed underline, gentle throb */
+#current-data::after {
+    content: '';
+    display: inline-block;
+    width: 0.6em;
+    height: 0.14em;
+    border-radius: 1px;
+    background: var(--accent-a);
+    margin-left: 0.3rem;
+    opacity: 0.3;
+    animation: cursorThrob 2.6s ease-in-out infinite;
+}
+
+@keyframes cursorThrob {
+    0%,
+    100% {
+        opacity: 0.25;
+    }
+    50% {
+        opacity: 0.7;
+    }
 }
 
 .overflow-anchor-none {
@@ -210,12 +442,26 @@ li i {
 
 .cell {
     padding: 0.5rem;
-    border-radius: 7px;
-    border: 2px groove var(--color3);
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .fluidity-packet {
     margin-bottom: 1.25rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 6px;
+    line-height: 1.35;
+    transition: background-color 0.15s ease;
+    /* long comma/slash-separated tokens (NMEA sentences, SRS port-state lines)
+       have no spaces to wrap at and would push the stream wider than a phone,
+       showing a horizontal scrollbar. break anywhere so a packet wraps to more
+       lines instead of overflowing. overflow-wrap inherits to the field spans. */
+    overflow-wrap: anywhere;
+}
+
+.fluidity-packet:hover {
+    background: rgba(112, 108, 157, 0.16); /* periwinkle as interaction shading */
 }
 
 .fade-in {
@@ -235,6 +481,7 @@ li i {
 .fluidity-packet .site {
     text-transform: uppercase;
     color: var(--color4);
+    letter-spacing: 0.04em;
 }
 
 .fluidity-packet .description {
@@ -261,6 +508,9 @@ li i {
 .fluidity-packet .fp-line {
     display: inline-block;
     margin-left: 0.3rem;
+    /* keep the inline-block within the cell so a long field wraps rather than
+       widening the row past the viewport */
+    max-width: 100%;
 }
 
 .fluidity-packet .fp-trim {
@@ -318,7 +568,10 @@ li i {
     display: block;
     text-align: center;
     margin-top: 10px;
+}
 
+#about-link:hover {
+    color: var(--color9);
 }
 
 /* About page */
@@ -333,8 +586,10 @@ li i {
 #container-about-text {
     max-width: 600px;
     padding: 20px;
-    border-radius: 10px;
-    box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+    border-radius: 14px;
+    border: 1px solid var(--line);
+    background: linear-gradient(90deg, var(--surface-cell) 72%, var(--surface-cell-hi) 100%);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 #container-about #logo-link {
@@ -378,11 +633,15 @@ li i {
     font-size: 1.2em;
 }
 
-
 /* Begin Loader: */
-.loader {
+/* concentric expanding rings - the logo's own ripple motif, in its gradient
+   colors (pink inner ring, peach trailing ring). The box is reserved
+   permanently so the rings appearing never reflows the header (which would
+   resize the sparkline canvas) */
+#loader {
     width: 40px;
     height: 40px;
+    flex: none;
     display: inline-block;
     position: relative;
 }
@@ -394,7 +653,7 @@ li i {
     width: 40px;
     height: 40px;
     border-radius: 50%;
-    border: 2px solid var(--light);
+    border: 2px solid var(--accent-a);
     position: absolute;
     left: 0;
     top: 0;
@@ -402,6 +661,7 @@ li i {
 }
 
 .loader::after {
+    border-color: var(--accent-b);
     animation-delay: 1s;
 }
 
@@ -419,25 +679,74 @@ li i {
 /* End Loader: */
 
 ::-webkit-scrollbar {
-    height: 12px;
-    width: 12px;
-    background: var(--color1);
+    height: 10px;
+    width: 10px;
+    background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-    background: var(--color5);
-    -webkit-border-radius: 1ex;
-    -webkit-box-shadow: var(--color4);
+    background: var(--shade-strong);
+    border-radius: 1ex;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-a);
+}
+
+#cell-data {
+    scrollbar-width: thin;
+    scrollbar-color: var(--shade-strong) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .fade-in {
+        animation: none;
+    }
+
+    .loader::after,
+    .loader::before {
+        animation: none;
+        opacity: 0.4;
+        transform: scale(0.6);
+    }
+
+    a,
+    #container-main li,
+    .fluidity-packet,
+    #logo-link {
+        transition: none;
+    }
+
+    .live-dot--fresh {
+        animation: none;
+    }
+
+    #current-data::after {
+        animation: none;
+        opacity: 0.4;
+    }
 }
 
 @media (min-width: 550px) {
     body {
-        margin: var(--small-gap);
+        /* padding, not margin: it sits inside the 100svh box so the app fills
+           the viewport exactly (margin would push it past and add a scrollbar) */
+        padding: var(--small-gap);
+    }
+
+    #pulse {
+        display: block;
+        flex: 0 1 16rem;
+        min-width: 6rem;
+        height: 2.3rem;
+        margin: 0 1.25rem;
     }
 
     #container-main {
         display: grid;
-        grid-template-columns: 9rem auto;
+        /* the site rail adapts to its widest (truncated) pill, floor 9rem,
+           so the column grows when one site name is longer than the rest */
+        grid-template-columns: minmax(9rem, max-content) auto;
     }
 
     #cell-sites {
@@ -448,6 +757,8 @@ li i {
         display: flex;
         gap: var(--small-gap);
         padding: 1rem;
+        /* pills are the tallest content in the bar (stats are one line), so
+           centering also keeps the chip row level with the site rail */
         align-items: center;
         justify-content: space-between;
     }
@@ -484,7 +795,7 @@ li i {
 /*  Large high-res */
 @media (min-width: 1920px) {
     body {
-        margin: var(--big-gap);
+        padding: var(--big-gap);
     }
 
     #container-main {
@@ -502,5 +813,9 @@ li i {
 
     #cell-stats {
         gap: 0.5rem;
+    }
+
+    #cell-stats .stat-name:not(:first-child) {
+        margin-left: 1.2rem;
     }
 }

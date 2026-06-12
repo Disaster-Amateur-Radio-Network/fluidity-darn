@@ -1,10 +1,8 @@
-/// <reference types="node" resolution-mode="require"/>
+import type { NodeEnv } from '#@shared/types.js';
 export declare const inBrowser: () => boolean;
+export declare const nodeEnv: () => NodeEnv;
 export declare const isErrnoException: (object: Error) => object is NodeJS.ErrnoException;
+export declare const isCatastrophicRegex: (source: string) => boolean;
 export declare function counter(): IterableIterator<number>;
 export declare const prettyFsNotFound: (err: Error) => Promise<string | undefined>;
-export type WithRequired<T, K extends keyof T> = T & {
-    [P in K]-?: T[P];
-};
-export declare const isJSONString: (str: string) => boolean;
 //# sourceMappingURL=utils.d.ts.map

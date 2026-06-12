@@ -13,6 +13,7 @@
         {
             "description": "Net Watcher",
             "plugin": "hamLive",
+            "enabled": false,
             "url": "https://www.ham.live/api/data/livenets",
             "pollIntervalSec": 60
         },
@@ -47,6 +48,15 @@
             "plugin": "genericSerial",
             "path": "/dev/tty.usbmodem11401",
             "baudRate": 9600
+        },
+        {
+            "description": "LAN Sensors",
+            "plugin": "udpStruct",
+            "port": 17996,
+            "bind": "127.0.0.1",
+            "extendedOptions": {
+                "siteFromPacket": true
+            }
         }
 
     ]

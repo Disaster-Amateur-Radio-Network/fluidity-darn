@@ -2,40 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import https from 'node:https';
-import { readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isFfluidityPacket } from '#@shared/types.js';
-import { WebJSONCollector } from '../modules/collectors.js';
-import { MockPortSRSCollector, srsParams } from './helpers.js';
-const tlsOptions = {
-    key: readFileSync('../server/ssl/dev-server_key.pem'),
-    cert: readFileSync('../server/ssl/dev-server_cert.pem')
-};
-const startTarget = async (statusCode = 200) => {
-    const received = [];
-    let waiters = [];
-    const server = https.createServer(tlsOptions, (req, res) => {
-        let body = '';
-        req.on('data', (c) => (body += c));
-        req.on('end', () => {
-            const parsed = JSON.parse(body);
-            received.push(parsed);
-            waiters.forEach(w => w(parsed));
-            waiters = [];
-            res.statusCode = statusCode;
-            res.end();
-        });
-    });
-    server.listen(0, '127.0.0.1');
-    await once(server, 'listening');
-    const { port } = server.address();
-    return {
-        server,
-        location: `https://localhost:${port}/FIFO`,
-        received,
-        next: () => new Promise(resolve => waiters.push(resolve))
-    };
-};
+import { DataCollector, WebJSONCollector } from '../modules/collectors.js';
+import { MockPortSRSCollector, srsParams, startTarget, tlsOptions } from './helpers.js';
 void test('serial data flows through the collector onto the wire as a FluidityPacket', async () => {
     const target = await startTarget();
     try {
@@ -122,5 +92,55 @@ void test('missing or malformed api key: request is never sent (regression: it u
     }
     finally {
         target.server.close();
+    }
+});
+class FloodCollector extends DataCollector {
+    start() { }
+    format(data, fh) {
+        return fh.e(data).done;
+    }
+    flood(lines) {
+        for (let i = 0; i < lines; i++)
+            this.send(`line ${i}`);
+    }
+}
+void test('a line source that outruns the throttle is shed at the base class, never queued without bound', async () => {
+    const target = await startTarget();
+    try {
+        const collector = new FloodCollector({
+            plugin: 'floodTest',
+            description: 'line-noise burst',
+            site: 'test',
+            targets: [{ location: target.location, key: 'floodkey1' }],
+            maxHttpsReqPerCollectorPerSec: 50
+        });
+        collector.flood(500);
+        assert.equal(collector.backpressureShed, 400);
+        await sleep(2400);
+        assert.ok(target.received.length <= 100, `only the admitted lines publish (${target.received.length})`);
+        assert.ok(target.received.length >= 90, `the admitted lines DO publish (${target.received.length})`);
+    }
+    finally {
+        target.server.close();
+    }
+});
+void test('the in-flight bound is hard-capped, so a huge throttle cannot balloon memory', async () => {
+    const stalled = await startTarget();
+    const sockets = [];
+    stalled.server.on('connection', s => sockets.push(s));
+    try {
+        const collector = new FloodCollector({
+            plugin: 'floodTest',
+            description: 'huge throttle',
+            site: 'test',
+            targets: [{ location: stalled.location, key: 'floodkey1' }],
+            maxHttpsReqPerCollectorPerSec: 100000
+        });
+        collector.flood(4000);
+        assert.equal(collector.backpressureShed, 4000 - 1024);
+    }
+    finally {
+        sockets.forEach(s => s.destroy());
+        stalled.server.close();
     }
 });
