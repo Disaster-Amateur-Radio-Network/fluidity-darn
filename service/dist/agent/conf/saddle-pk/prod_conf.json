@@ -4,11 +4,6 @@
     "logLevel": "info",
     "collectors": [
         {
-            "description": "Agent Report",
-            "plugin": "vRep",
-            "pollIntervalSec": 3600
-        },
-        {
             "description": "Net Watcher",
             "plugin": "hamLive",
             "url": "https://www.ham.live/api/data/livenets",

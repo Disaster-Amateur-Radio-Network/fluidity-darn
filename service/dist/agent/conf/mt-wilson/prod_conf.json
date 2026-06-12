@@ -4,11 +4,6 @@
     "logLevel": "info",
     "collectors": [
         {
-            "description": "Agent Report",
-            "plugin": "vRep",
-            "pollIntervalSec": 3600
-        },
-        {
             "description": "SRS",
             "plugin": "srsSerial",
             "path": "COM4",
